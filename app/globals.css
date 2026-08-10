@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* No dark-mode variant here on purpose — every surface in this app is an
+   explicit light Tailwind class (bg-white, bg-gray-50, etc.), never a plain
+   `<p>`/`<input>` relying on inherited color. A prefers-color-scheme swap of
+   --foreground would only affect the few elements that DO rely on
+   inheritance, silently washing them out on a light background whenever the
+   OS is in dark mode — which is exactly what happened with unstyled form
+   inputs. Revisit if the app ever gets real dark-mode surfaces. */
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
