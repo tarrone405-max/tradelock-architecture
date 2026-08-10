@@ -27,13 +27,29 @@ export default async function ClientPortalPage({
   const { data: project } = await supabaseAdmin
     .from("projects")
     .select(
-      "id, client_name, property_address, user_id, users(company_name, stripe_connect_charges_enabled)"
+      "id, client_name, property_address, user_id, portal_token_revoked_at, users(company_name, stripe_connect_charges_enabled)"
     )
     .eq("unique_token", token)
     .maybeSingle();
 
   if (!project) {
     notFound();
+  }
+
+  // Deliberately revoked, not just an unrecognized token — distinct enough
+  // from a generic 404 that a client isn't left wondering whether they
+  // mistyped the link.
+  if (project.portal_token_revoked_at) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
+        <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 text-center">
+          <h1 className="text-lg font-semibold text-gray-900">This link is no longer active</h1>
+          <p className="mt-2 text-sm text-gray-900">
+            Please contact your contractor for an updated link.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   const [{ data: changeOrders }, { data: activeTerms }] = await Promise.all([
@@ -159,7 +175,12 @@ export default async function ClientPortalPage({
 
                 {co.status === "approved" && (
                   <div className="mt-4 border-t border-gray-100 pt-4">
-                    {providerAcceptsPayments ? (
+                    {!co.provider_signed_at ? (
+                      <p className="text-center text-xs text-gray-900">
+                        Waiting on {companyName || "your contractor"} to countersign before
+                        payment can be collected.
+                      </p>
+                    ) : providerAcceptsPayments ? (
                       <form action={payChangeOrder}>
                         <input type="hidden" name="token" value={token} />
                         <input type="hidden" name="changeOrderId" value={co.id} />

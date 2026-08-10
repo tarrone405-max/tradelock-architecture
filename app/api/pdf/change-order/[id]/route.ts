@@ -34,7 +34,9 @@ export async function GET(
 
   const { data: project } = await supabaseAdmin
     .from("projects")
-    .select("id, client_name, property_address, unique_token, user_id, users(company_name)")
+    .select(
+      "id, client_name, property_address, unique_token, portal_token_revoked_at, user_id, users(company_name)"
+    )
     .eq("id", changeOrder.project_id)
     .maybeSingle();
 
@@ -42,7 +44,11 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  let authorized = token !== null && token === project.unique_token;
+  // A revoked/rotated-away portal token must stop working here too — the
+  // authenticated-provider fallback path just below is unaffected, since
+  // revocation is about killing client access, not the provider's own.
+  let authorized =
+    token !== null && token === project.unique_token && !project.portal_token_revoked_at;
 
   if (!authorized) {
     const supabase = await createClient();

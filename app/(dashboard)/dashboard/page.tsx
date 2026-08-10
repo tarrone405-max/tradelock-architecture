@@ -34,12 +34,12 @@ export default async function DashboardPage() {
       .maybeSingle(),
     supabase
       .from("projects")
-      .select("id, client_name, property_address, unique_token, created_at")
+      .select("id, client_name, property_address, unique_token, portal_token_revoked_at, created_at")
       .order("created_at", { ascending: false }),
     // RLS already scopes this to change orders on projects this provider owns.
     supabase
       .from("change_orders")
-      .select("id, project_id, status, cost, created_at")
+      .select("id, project_id, status, cost, created_at, client_signed_at, provider_signed_at")
       .order("created_at", { ascending: false }),
   ]);
 
@@ -72,10 +72,18 @@ export default async function DashboardPage() {
   }
 
   // The one change order a project card's offline-payment menu acts on —
-  // its most recently created not-yet-settled order, if any.
+  // its most recently created fully-executed (both signatures in), not-yet-
+  // settled order, if any. Matches the settlement rule recordOfflinePayment
+  // enforces server-side: a pending or only-client-signed order isn't
+  // eligible, so it's excluded here too rather than showing a menu action
+  // that would just fail.
   function activeChangeOrder(projectId: string) {
     const projectOrders = ordersByProject.get(projectId) ?? [];
-    return projectOrders.find((o) => o.status === "pending" || o.status === "approved") ?? null;
+    return (
+      projectOrders.find(
+        (o) => o.status === "approved" && o.client_signed_at && o.provider_signed_at
+      ) ?? null
+    );
   }
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
@@ -262,7 +270,13 @@ export default async function DashboardPage() {
                       )}
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <CopyLinkButton url={`${siteUrl}/p/${project.unique_token}`} />
+                      {project.portal_token_revoked_at ? (
+                        <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700">
+                          Link revoked
+                        </span>
+                      ) : (
+                        <CopyLinkButton url={`${siteUrl}/p/${project.unique_token}`} />
+                      )}
                       {active && <OfflinePaymentMenu changeOrderId={active.id} />}
                     </div>
                   </div>

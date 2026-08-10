@@ -1,0 +1,114 @@
+# TradeLock — Project Guidelines & Architecture
+## Tech Stack
+- Framework: Next.js (App Router, TypeScript)
+- Styling: Tailwind CSS & Lucide Icons
+- Database & Auth: Supabase (PostgreSQL, Row Level Security)
+- Payments: Stripe (Billing & Checkout)
+## Core Architecture Rules
+- Use Next.js Server Actions for database mutations.
+- Keep components mobile-first and responsive (contractors use this on mobile devices in the field).
+- Never store sensitive data or secret keys in client-side components.
+- Always validate magic-link tokens (`unique_token`) securely when fetching client portal data.
+## Common Commands
+- Run dev server: `npm run dev`
+- Build project: `npm run build`
+## Architectural State & History
+_Last updated: after the launch-hardening pass (change_orders RLS lockdown, dual-signature settlement rule, payment audit fields, split Stripe webhooks + idempotency, portal link revoke/rotate). This section is rewritten wholesale each time, not appended to — treat it as the current-state snapshot, not a changelog._
+
+### Stack & Core Architecture
+- Framework: Next.js App Router + TypeScript, Tailwind CSS v4, Lucide icons.
+- Location: `C:\Users\tarro\Documents\TradeALock architecture` (npm package name is `tradelock`, not the folder name — folder has a space/capitals).
+- Database/Auth: Supabase (hosted/remote project, ref `lsqospqznysalsayrepb`) — no local Supabase CLI stack; every migration is applied manually by the user pasting SQL into the Supabase Dashboard SQL Editor. `supabase/migrations/*.sql` files are the source of truth Codex writes, but cannot apply them directly (no DB connection string, no persisted CLI auth). Generating `types/supabase.ts` needs a fresh one-off Supabase access token each time (user generates it, pastes it, revokes it after) — there is no standing credential.
+- Payments: Stripe — subscription Checkout ($49/mo, platform account) and one-time change-order payment Checkout. Change-order payments are Stripe Connect **destination charges**: money routes straight to the provider's own connected Express account (`users.stripe_account_id`), not the platform balance, with an optional basis-point platform cut via `STRIPE_APPLICATION_FEE_BPS`. **Two separate webhook endpoints** (see Key patterns): `/api/webhooks/stripe` for platform-account events, `/api/webhooks/stripe/connect` for connected-account events, each with its own signing secret and both deduped through `stripe_webhook_events`.
+- Email: Resend + `@react-email/components`, via `lib/resend.ts`. Falls back to `console.log` in dev when `RESEND_API_KEY` is unset (currently unset — emails are not actually sending yet).
+- Git: `C:\` is a git repo tracking the whole drive; every commit is scoped to this project's pathspec only (`git add`/`commit -- .` from inside the project dir). No global git author configured — commits use inline `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` env vars.
+
+### Key patterns
+- Two Supabase client types, both typed via generated `types/supabase.ts`:
+  - `lib/supabase/server.ts` → `createClient()` — session-aware, cookie-based, RLS-respecting. Ordinary provider CRUD (create project, create change order, settings, reading own profile).
+  - `lib/supabase/admin.ts` → `getSupabaseAdmin()` — service-role, bypasses RLS. Used for: the client portal (homeowners have no Supabase Auth session, so the token is validated in code instead), billing, offline-payment status changes, countersigning, webhooks. Lazy singleton — `next build` imports route handlers without invoking them, so eager env-var checks at module scope break the build.
+  - `lib/stripe.ts` → `getStripe()` — same lazy-singleton reasoning.
+- Portal auth pattern: `/p/[token]` and its Server Actions never use the RLS `x-portal-token` header policy Phase 2 originally designed (still in the DB as harmless defense-in-depth) — the app authorizes by looking up the project via `unique_token` through the service-role client and re-scoping every mutation with `.eq("project_id", ...)`.
+- `next.config.ts` has `agentRules: false` — stops Next 16's dev server from auto-injecting an "AI agent rules" block into this file on every `npm run dev`. If you ever see a `<!-- BEGIN:nextjs-agent-rules -->` block appear here, it's that (already disabled, but noting the marker in case it resurfaces).
+- `proxy.ts` (not `middleware.ts` — Next 16 renamed the convention) does two things: refreshes the session + redirects unauthenticated `/dashboard/*` to `/login`, **and** hard-enforces entitlement — redirects to `/dashboard/billing` if the provider isn't `subscription_status = 'active'` AND their `trial_ends_at` has passed. `/dashboard/billing` itself is exempt. A missing `users` row (brand new account, profile not yet synced) fails *open*, not closed.
+- Two entirely separate "Terms of Service" concepts — don't conflate them:
+  1. **Platform ToS** (`lib/platformTerms.ts`, `app/terms/page.tsx`, `users.terms_accepted*`) — TradeLock's own terms, fixed version string (`"v1"`), every provider accepts once at signup via a required checkbox.
+  2. **Client-facing ToS** (`terms_of_service` table) — the terms shown to a provider's clients in the portal, versioned. No longer provider-editable: the `/dashboard/settings` editing card and its `updateTermsOfService` Server Action were removed (letting contractors author their own unvetted legal text was a liability risk). New versions are now published only via `scripts/publish-terms.mjs` (`npm run publish-terms <provider-email> <path-to-terms.txt>`), run by whoever operates TradeLock using the service-role key — codebase/admin-only, never exposed over HTTP or to a provider's session.
+- Dual signature model on change orders: client signs first (canvas + typed legal name, via the portal) → provider countersigns afterward (typed name only, via the dashboard, only unlockable once the client has signed). `ExecutionStatusBadge` (derived, not stored) shows "Pending Client Signature" / "Pending Provider Review" / "Fully Executed" from the two `*_signed_at` timestamps — this is a different axis from the existing payment-status `StatusBadge` (pending/approved/paid/cash/check/financed/declined) and the two badges intentionally coexist.
+- Stripe Connect (direct payment routing, Phase 7): `app/actions/connect.ts` handles onboarding (`startStripeConnectOnboarding` — creates an Express account + `accountLinks` and redirects to Stripe-hosted onboarding, reusable to resume an incomplete account), the Express dashboard deep-link (`openStripeExpressDashboard`, via `accounts.createLoginLink`), and `getConnectStatus` (live `accounts.retrieve` call, opportunistically syncs `users.stripe_connect_charges_enabled`/`payouts_enabled`, called from the settings page on every render). `payChangeOrder` (`app/p/[token]/actions.ts`) refuses to create a Checkout Session unless the provider has a `stripe_account_id` with `stripe_connect_charges_enabled = true`, then creates it with `payment_intent_data: { transfer_data: { destination }, application_fee_amount? }` — a destination charge, so the platform Stripe account never touches client funds. The client portal (`app/p/[token]/page.tsx`) hides the Pay button (shows a "contact your contractor directly" message instead) when the provider hasn't finished onboarding, reading `users.stripe_connect_charges_enabled` via the same join as `company_name`.
+- **`change_orders` RLS is deliberately much tighter than the other tables** (Phase 8, `20260810100000_harden_change_order_rls.sql`): `authenticated` gets column-level grants only — INSERT limited to `(project_id, description, cost, due_date)` (exactly what `createChangeOrder` sets), UPDATE limited to `(description, due_date)` and only while `status = 'pending'`, DELETE only while `status = 'pending'`. Cost, status, signatures, terms fields, Stripe IDs, and project ownership can never be set/changed directly through Supabase by a provider's own session, at any status — every real mutation of those fields goes through a service-role Server Action with its own explicit ownership + state checks (unchanged by this migration). Don't loosen these grants without re-reading that migration's header comment.
+- **Settlement rule** (Phase 8): both `client_signed_at` AND `provider_signed_at` must be set — not just `status = 'approved'`, which only means the client signed — before a change order can be paid online (`payChangeOrder`) or marked paid offline (`recordOfflinePayment`). Enforced server-side in both actions and mirrored in every UI gate that shows a pay/mark-paid control: `app/p/[token]/page.tsx` (portal Pay button), `app/(dashboard)/dashboard/projects/[id]/page.tsx` and `app/(dashboard)/dashboard/page.tsx` (`OfflinePaymentMenu` visibility, via `canRecordPayment`/`activeChangeOrder`).
+- **Payment audit trail** (Phase 8): beyond `stripe_payment_intent_id`/`stripe_connected_account_id`, `change_orders` also records `stripe_checkout_session_id`, `stripe_charge_id`, `currency`, and `application_fee_amount` — all written only by the webhook's `markChangeOrderPaid` (never by a session client; the RLS grants above make that structurally true, not just a convention). None of these are selected by the client-portal page/actions — only the dashboard/service-role paths ever read them.
+- **Two Stripe webhook endpoints, split by account type** (Phase 8): `/api/webhooks/stripe` (platform account — Checkout completed/async events, subscription lifecycle) verified with `STRIPE_WEBHOOK_SECRET`, and `/api/webhooks/stripe/connect` (connected-account events — `account.updated`, `account.application.deauthorized`) verified with a separate `STRIPE_CONNECT_WEBHOOK_SECRET`. Both call `isNewWebhookEvent()` (`lib/stripeWebhookEvents.ts`) right after signature verification, which inserts the Stripe event id into `stripe_webhook_events` (PK) and treats a unique-violation as "already processed, skip" — real idempotency against Stripe's documented at-least-once/out-of-order delivery, not just the incidental idempotency of the per-row `status` guards. The subscription-status and Connect-account-status handlers additionally guard against out-of-order delivery with `users.stripe_subscription_event_at`/`stripe_connect_event_at` (only apply an event if its `event.created` is newer than the last one applied for that row). Both endpoints need to be created and configured separately in the Stripe Dashboard — see outstanding items.
+- **Portal link revoke/rotate** (Phase 8, `20260810130000_add_portal_link_revocation.sql`): `projects.portal_token_revoked_at` (nullable, defaults NULL so no existing link broke when this shipped). `revokePortalLink`/`rotatePortalLink` (`app/(dashboard)/dashboard/actions.ts`) are provider-initiated Server Actions on the project detail page — revoke kills access via the current token with no replacement, rotate issues a fresh `unique_token` (via `crypto.randomUUID()`) and un-revokes. Every client-facing token lookup (`app/p/[token]/actions.ts`'s `getProjectByToken`, `app/p/[token]/page.tsx`, the PDF route's token branch) now also checks this column — a revoked token is treated as invalid everywhere except the portal page itself, which shows a dedicated "this link is no longer active" message instead of a bare 404. Rotating does **not** currently email the client the new link automatically — flagged as an open product decision, not decided unilaterally.
+
+### Database Schema (current live state — all migrations below are applied and confirmed via a full Playwright pass)
+
+**`users`** (1:1 extension of `auth.users`)
+`id, company_name, email, stripe_customer_id, created_at, subscription_status (default 'inactive'), stripe_subscription_id, trial_ends_at, subscription_tier, terms_accepted (default false), terms_accepted_at, terms_version, stripe_account_id, stripe_connect_charges_enabled (default false), stripe_connect_payouts_enabled (default false), stripe_subscription_event_at, stripe_connect_event_at`
+RLS: own-row view/insert/update, but `UPDATE` is column-restricted — `authenticated` can only touch `company_name`; every other field (billing, trial, platform-ToS acceptance, Connect status, webhook-ordering timestamps) is service-role-only writable.
+
+**`projects`**
+`id, user_id→users, client_name, client_email, property_address, unique_token (magic link), portal_token_revoked_at, created_at`
+RLS: providers full CRUD on own rows (unchanged/not locked down — revocation is provider self-service by design, see Key patterns).
+
+**`change_orders`**
+`id, project_id→projects, description, cost, status, signature_data, signed_at, created_at, payment_reference, terms_version_id→terms_of_service, terms_accepted_at, due_date, provider_signed_at, provider_signature_name, client_signed_at, client_signature_name, stripe_payment_intent_id, stripe_connected_account_id, stripe_checkout_session_id, stripe_charge_id, currency, application_fee_amount`
+`status ∈ pending | approved | declined | paid | cash | check | financed`
+RLS (tightened Phase 8 — see Key patterns): `authenticated` INSERT/UPDATE/DELETE are all column- and/or status-restricted now, not blanket ownership-only; zero anon/client write grants (portal writes always go through service-role + code checks).
+
+**`terms_of_service`** (client-facing, per-provider, versioned)
+`id, user_id→users, version, content, is_active, created_at` — publishing deactivates the old row and inserts a new one, never mutates in place; partial unique index enforces one active version per provider.
+
+**`stripe_webhook_events`** (Phase 8, idempotency ledger)
+`id (Stripe event id, PK), type, endpoint ('platform'|'connect'), received_at` — RLS enabled with zero policies (service-role-only by construction, same as every webhook write).
+
+**Migrations applied, in order** (all confirmed live):
+1. `20260809120000_initial_schema.sql` — base users/projects/change_orders + RLS
+2. `20260809130000_add_subscription_fields.sql` — subscription_status/stripe_subscription_id + column-grant lockdown (⚠️ was silently un-applied for most of an earlier session — caught when strict generated types surfaced it as a build error; lesson: don't assume a written migration file means it's live)
+3. `20260809140000_add_offline_payment_methods.sql` — cash/check/financed + payment_reference
+4. `20260809150000_add_terms_of_service.sql` — client-facing terms_of_service table + change_orders terms columns
+5. `20260809160000_add_trial_and_tier.sql` — trial_ends_at + subscription_tier on users
+6. `20260809170000_add_change_order_due_date.sql` — due_date on change_orders
+7. `20260809180000_add_provider_terms_acceptance.sql` — platform ToS acceptance fields on users
+8. `20260809190000_add_dual_signature_fields.sql` — provider/client signature name+timestamp pairs on change_orders
+9. `20260809200000_add_stripe_connect.sql` — applied and confirmed live — `stripe_account_id`/`stripe_connect_charges_enabled`/`stripe_connect_payouts_enabled` on users, `stripe_payment_intent_id`/`stripe_connected_account_id` on change_orders
+10. `20260810100000_harden_change_order_rls.sql` — **not yet applied** — column/status-restricted INSERT/UPDATE/DELETE grants on change_orders (see Key patterns)
+11. `20260810110000_add_payment_audit_fields.sql` — **not yet applied** — stripe_checkout_session_id/stripe_charge_id/currency/application_fee_amount on change_orders
+12. `20260810120000_add_webhook_idempotency.sql` — **not yet applied** — new stripe_webhook_events table + stripe_subscription_event_at/stripe_connect_event_at on users
+13. `20260810130000_add_portal_link_revocation.sql` — **not yet applied** — portal_token_revoked_at on projects
+
+### Completed work (commit status)
+
+| What | Commit |
+|---|---|
+| Phase 1: AGENTS.md + Next.js scaffold | `66804ee` |
+| Phase 2–3: Supabase schema + Stripe billing ($49/mo checkout, initial webhook) | `6e2d393` |
+| Phase 4 + redesign: Supabase Auth, dashboard base, premium UI redesign | `daf17d0` |
+| Auth fix: green success message, `/auth/callback` | `eab3329` |
+| Phase 5 + sweep + offline payments + client ToS: portal, signature pad, Stripe one-time payment, contrast sweep rounds 1–2, cash/check/financed, editable client-facing ToS | `a539a3d` |
+| Types regen, PDF export, contrast round 3 root-cause fix | `4f378c9` |
+| Trial/tier tracking, Resend emails, dual signatures, platform ToS acceptance, due dates | `57a4748` |
+| Auth redirect fix: use `NEXT_PUBLIC_SITE_URL` instead of a hardcoded host | `bed2fcc` |
+| Stripe Connect direct payment routing (destination charges, onboarding flow, webhook verification, portal gating) | `d2b0a95` |
+| Stripe Price ID config fix (was a Product ID) + settings-page ToS editing removal + `scripts/publish-terms.mjs` | `22539d9` |
+| Launch hardening: change_orders RLS lockdown, dual-signature settlement rule, payment audit fields, split Stripe webhooks + idempotency/out-of-order guards, portal link revoke/rotate | not committed |
+
+**The contrast issue was a real bug, not just a preference**, resolved: `app/globals.css` had the leftover create-next-app `@media (prefers-color-scheme: dark)` block swapping `--foreground` to near-white, and a couple of `<input>`/`<textarea>` elements had no explicit text-color class, so typed text went invisible-light for any user with OS/browser dark mode on. Fixed both the specific inputs and removed the dark-mode block entirely (this app has no dark-mode design anywhere else). Confirmed via Playwright with forced `colorScheme: "dark"` emulation, not just visual inspection.
+
+### Known outstanding items
+- **Migrations 10–13 (the Phase 8 launch-hardening set) are written but not yet applied** — paste them into the Supabase SQL Editor in order before any of this session's code paths (RLS lockdown, payment audit columns, webhook idempotency table, portal revocation column) will actually work against the live database.
+- **`/api/webhooks/stripe/connect` is a brand-new endpoint that doesn't exist in the Stripe Dashboard yet** — needs to be created there (URL: `{site}/api/webhooks/stripe/connect`), subscribed to `account.updated` and `account.application.deauthorized`, and its signing secret pasted into `STRIPE_CONNECT_WEBHOOK_SECRET`. The *old* single-endpoint approach (subscribing `/api/webhooks/stripe` itself to Connect events) no longer applies — `account.updated` handling was moved off that endpoint, so if the original endpoint is still subscribed to Connect events in the Dashboard from an earlier session, those events will now arrive unhandled there. Double-check the Dashboard's event-type subscriptions on both endpoints after applying this change.
+- **Provider-facing ToS editing has been removed** (see Key patterns above) — the settings page no longer has a Terms of Service card; `app/(dashboard)/dashboard/settings/actions.ts` was deleted entirely. New client-facing terms versions are published only via `scripts/publish-terms.mjs`.
+- **Stripe Connect onboarding is blocked on a real Stripe account step, confirmed via a live Playwright run**: clicking "Connect Stripe account" throws `"Your account must be activated in order to create accounts."` — this is the *platform's own* Stripe account (the one behind `STRIPE_SECRET_KEY`) needing to finish activation/business-profile setup at `https://dashboard.stripe.com/account/onboarding` before it's allowed to create Express connected accounts on behalf of providers. Not a code bug — the onboarding button, `accountLinks` redirect, and DB persistence are all correct as built; nothing about Connect (destination-charge payment routing, webhook cross-check, portal gating, the Phase 8 hardening) has been end-to-end tested against a real connected account yet because this step blocks it.
+- `STRIPE_APPLICATION_FEE_BPS` is unset (0% platform fee) — pricing on the Connect cut hasn't been decided.
+- `STRIPE_WEBHOOK_SECRET` is set but has never been exercised against a real `stripe listen` session or a real Stripe event — only the webhook's code path has been verified directly. `STRIPE_PRICE_ID` now points at a real test-mode Price (fixed a prior session — it previously held a Product ID by mistake, which would have made every subscribe attempt fail); Checkout session creation was confirmed live via Playwright, reaching a real `checkout.stripe.com` page. Stripe CLI is not installed on this machine; needed for `stripe listen --forward-to localhost:3000/api/webhooks/stripe` and `--forward-connect-to localhost:3000/api/webhooks/stripe/connect`.
+- **Product/business decisions flagged, not decided, this session** (per explicit instruction not to guess on these):
+  - Rotating a portal link does **not** automatically email the client the new URL — the provider currently has to resend it themselves out of band. Auto-emailing would be a small addition on top of the existing Resend integration, but touches client communication and felt like a call the user should make.
+  - There's no cascading behavior when a link is revoked (e.g. auto-declining pending change orders, notifying the client). Revocation only affects portal *access*; the underlying rows are untouched.
+  - No expiration/TTL-based auto-revocation exists — links stay live indefinitely until a provider explicitly revokes or rotates.
+- **Audit/evidence gap, not a legal opinion**: the dual-signature + payment audit trail (client/provider signed timestamps, Stripe Checkout Session/PaymentIntent/Charge ids) is the strongest evidence this app produces, but nothing here has been reviewed by counsel, and canvas signature images plus Stripe metadata are not independently a substitute for a legally binding e-signature process (no identity verification, no tamper-evident record format, no long-term retention/export policy for the signature PNGs or webhook event log). Treat "eliminates he-said-she-said disputes" as a product goal this session's changes materially advance, not a legal guarantee.
+- `RESEND_API_KEY` is empty — emails currently just log to console instead of sending.
+- `app/terms/page.tsx` (platform ToS) content includes indemnification and liability-limitation clauses — **needs real legal review before this is relied on**, it was drafted as a starting point, not vetted by a lawyer.
+- Supabase access tokens for type generation are one-off/never persisted by design — expect to need a fresh one each time `types/supabase.ts` needs regenerating after a schema change.
+- A full end-to-end Playwright pass (signup ToS gate → project/change-order creation with due date → client sign with 3-way gate → provider countersign → execution badges → PDF dual-signature record) passed completely as of this snapshot. Along the way, hit Supabase Auth's email-sending rate limit on a real signup attempt (external infra limit from cumulative testing, not a bug) and routed around it via the admin API for the rest of the test.

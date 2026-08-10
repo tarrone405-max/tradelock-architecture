@@ -2,8 +2,14 @@ import { NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { getStripe } from "@/lib/stripe";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { hasProcessedWebhookEvent, markWebhookEventProcessed } from "@/lib/stripeWebhookEvents";
 
 export const runtime = "nodejs";
+
+// Platform-account events only: Checkout (subscription + change-order
+// payment) and subscription lifecycle. Connected-account events
+// (account.updated etc.) go to /api/webhooks/stripe/connect instead — see
+// that route for why they're split, and for their own signing secret.
 
 function mapSubscriptionStatus(
   status: Stripe.Subscription.Status
@@ -45,12 +51,21 @@ function buildSubscriptionFields(subscription: Stripe.Subscription, forcedStatus
   };
 }
 
-// Marks a change order paid, but only after confirming the money actually
-// landed on the provider's own connected Stripe account — not just that
-// *some* payment succeeded. session.metadata is set by our own server code
-// in payChangeOrder (not attacker-controlled), but re-checking it against
-// the PaymentIntent's real transfer_data.destination guards against a stale
-// or mismatched account id ever getting recorded as a successful payout.
+// Marks a change order paid and records its payment audit trail, but only
+// after confirming the money actually landed on the provider's own
+// connected Stripe account — not just that *some* payment succeeded.
+// session.metadata is set by our own server code in payChangeOrder (not
+// attacker-controlled), but re-checking it against the PaymentIntent's real
+// transfer_data.destination guards against a stale or mismatched account id
+// ever getting recorded as a successful payout.
+//
+// Throws on a failed database write so the caller's try/catch can return a
+// non-2xx response and let Stripe retry — but a destination mismatch is a
+// deliberate refusal, not a transient failure, so it returns normally
+// instead of throwing (retrying it would never change the outcome). The
+// final `.eq("status", "approved")` is what makes a successful write safe
+// to repeat: a second delivery of the same (or a later async_payment_*)
+// event simply matches zero rows.
 async function markChangeOrderPaid(
   session: Stripe.Checkout.Session,
   stripe: Stripe,
@@ -63,14 +78,18 @@ async function markChangeOrderPaid(
   const paymentIntentId =
     typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id;
 
-  if (expectedAccountId && paymentIntentId) {
+  let chargeId: string | null = null;
+  let currency: string | null = session.currency ?? null;
+  let applicationFeeAmount: number | null = null;
+
+  if (paymentIntentId) {
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
     const actualDestination =
       typeof paymentIntent.transfer_data?.destination === "string"
         ? paymentIntent.transfer_data.destination
         : paymentIntent.transfer_data?.destination?.id;
 
-    if (actualDestination !== expectedAccountId) {
+    if (expectedAccountId && actualDestination !== expectedAccountId) {
       console.error(
         `Refusing to mark change order ${changeOrderId} paid: payment intent ` +
           `${paymentIntentId} destination "${actualDestination}" does not match ` +
@@ -78,46 +97,39 @@ async function markChangeOrderPaid(
       );
       return;
     }
+
+    chargeId =
+      typeof paymentIntent.latest_charge === "string"
+        ? paymentIntent.latest_charge
+        : (paymentIntent.latest_charge?.id ?? null);
+    currency = paymentIntent.currency ?? currency;
+    applicationFeeAmount = paymentIntent.application_fee_amount ?? null;
   }
 
   const { error } = await supabaseAdmin
     .from("change_orders")
     .update({
       status: "paid",
+      stripe_checkout_session_id: session.id,
       stripe_payment_intent_id: paymentIntentId ?? null,
       stripe_connected_account_id: expectedAccountId ?? null,
+      stripe_charge_id: chargeId,
+      currency,
+      application_fee_amount: applicationFeeAmount,
     })
     .eq("id", changeOrderId)
     .eq("status", "approved");
 
   if (error) {
-    console.error("Failed to mark change order as paid:", error.message);
+    throw new Error(`Failed to mark change order ${changeOrderId} as paid: ${error.message}`);
   }
 }
 
-export async function POST(request: Request) {
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!webhookSecret) {
-    console.error("Missing STRIPE_WEBHOOK_SECRET environment variable");
-    return NextResponse.json({ error: "Webhook not configured" }, { status: 500 });
-  }
-
-  const signature = request.headers.get("stripe-signature");
-  const rawBody = await request.text();
-
-  const stripe = getStripe();
-  const supabaseAdmin = getSupabaseAdmin();
-
-  let event: Stripe.Event;
-  try {
-    if (!signature) throw new Error("Missing stripe-signature header");
-    event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`Stripe webhook signature verification failed: ${message}`);
-    return NextResponse.json({ error: `Webhook Error: ${message}` }, { status: 400 });
-  }
-
+async function handleEvent(
+  event: Stripe.Event,
+  stripe: Stripe,
+  supabaseAdmin: ReturnType<typeof getSupabaseAdmin>
+) {
   switch (event.type) {
     // Fired at the end of both kinds of checkout this app creates:
     // subscription (Phase 3 billing) and one-off payment (Phase 5+7 change
@@ -142,7 +154,7 @@ export async function POST(request: Request) {
             .eq("id", supabaseUserId);
 
           if (error) {
-            console.error("Failed to record checkout completion:", error.message);
+            throw new Error(`Failed to record checkout completion: ${error.message}`);
           }
         }
       } else if (session.mode === "payment" && session.payment_status === "paid") {
@@ -174,28 +186,6 @@ export async function POST(request: Request) {
       break;
     }
 
-    // Keeps the provider's payment-readiness flags in sync with Stripe as
-    // they complete (or lose) Connect onboarding, independent of whatever
-    // the settings page last saw. Requires this endpoint to be subscribed to
-    // Connect account events in the Stripe Dashboard (or via `stripe listen
-    // --forward-connect-to` in dev) — the event carries `account` when it
-    // originates from a connected account rather than the platform itself.
-    case "account.updated": {
-      const account = event.data.object as Stripe.Account;
-      const { error } = await supabaseAdmin
-        .from("users")
-        .update({
-          stripe_connect_charges_enabled: !!account.charges_enabled,
-          stripe_connect_payouts_enabled: !!account.payouts_enabled,
-        })
-        .eq("stripe_account_id", account.id);
-
-      if (error) {
-        console.error("Failed to sync Connect account status:", error.message);
-      }
-      break;
-    }
-
     // Fired on creation, renewals, plan/trial changes, payment failures, and
     // cancellations — keeps subscription_status, trial_ends_at, and
     // subscription_tier authoritative for the life of the plan.
@@ -204,6 +194,35 @@ export async function POST(request: Request) {
     case "customer.subscription.deleted": {
       const subscription = event.data.object as Stripe.Subscription;
       const customerId = subscription.customer as string;
+      const eventCreatedAt = new Date(event.created * 1000).toISOString();
+
+      const { data: currentUser, error: selectError } = await supabaseAdmin
+        .from("users")
+        .select("id, stripe_subscription_event_at")
+        .eq("stripe_customer_id", customerId)
+        .maybeSingle();
+
+      if (selectError) {
+        throw new Error(`Failed to look up user for subscription sync: ${selectError.message}`);
+      }
+
+      if (!currentUser) {
+        break;
+      }
+
+      // Out-of-order guard: skip if we've already applied a newer event for
+      // this customer (Stripe doesn't guarantee delivery order). This is an
+      // intentional no-op, not a failure — nothing to retry.
+      if (
+        currentUser.stripe_subscription_event_at &&
+        currentUser.stripe_subscription_event_at >= eventCreatedAt
+      ) {
+        console.log(
+          `Skipping stale subscription event ${event.id} (${event.type}) for customer ${customerId}`
+        );
+        break;
+      }
+
       const fields = buildSubscriptionFields(
         subscription,
         event.type === "customer.subscription.deleted" ? "canceled" : undefined
@@ -211,11 +230,11 @@ export async function POST(request: Request) {
 
       const { error } = await supabaseAdmin
         .from("users")
-        .update(fields)
-        .eq("stripe_customer_id", customerId);
+        .update({ ...fields, stripe_subscription_event_at: eventCreatedAt })
+        .eq("id", currentUser.id);
 
       if (error) {
-        console.error("Failed to sync subscription status:", error.message);
+        throw new Error(`Failed to sync subscription status: ${error.message}`);
       }
       break;
     }
@@ -223,6 +242,49 @@ export async function POST(request: Request) {
     default:
       break;
   }
+}
 
+export async function POST(request: Request) {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error("Missing STRIPE_WEBHOOK_SECRET environment variable");
+    return NextResponse.json({ error: "Webhook not configured" }, { status: 500 });
+  }
+
+  const signature = request.headers.get("stripe-signature");
+  const rawBody = await request.text();
+
+  const stripe = getStripe();
+  const supabaseAdmin = getSupabaseAdmin();
+
+  let event: Stripe.Event;
+  try {
+    if (!signature) throw new Error("Missing stripe-signature header");
+    event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`Stripe webhook signature verification failed: ${message}`);
+    return NextResponse.json({ error: `Webhook Error: ${message}` }, { status: 400 });
+  }
+
+  if (await hasProcessedWebhookEvent(supabaseAdmin, event.id)) {
+    return NextResponse.json({ received: true, duplicate: true });
+  }
+
+  // The event is only recorded as processed AFTER handleEvent resolves
+  // without throwing — see lib/stripeWebhookEvents.ts. If a database write
+  // inside it fails partway through, this returns a non-2xx response and
+  // Stripe retries the whole event from scratch rather than the retry
+  // finding the id already recorded and silently skipping the incomplete
+  // work.
+  try {
+    await handleEvent(event, stripe, supabaseAdmin);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`Failed to process Stripe webhook event ${event.id} (${event.type}): ${message}`);
+    return NextResponse.json({ error: "Webhook processing failed" }, { status: 500 });
+  }
+
+  await markWebhookEventProcessed(supabaseAdmin, event, "platform");
   return NextResponse.json({ received: true });
 }

@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
@@ -100,7 +101,7 @@ export async function recordOfflinePayment(formData: FormData) {
 
   const { data: changeOrder } = await supabaseAdmin
     .from("change_orders")
-    .select("id, project_id, status")
+    .select("id, project_id, status, client_signed_at, provider_signed_at")
     .eq("id", changeOrderId)
     .maybeSingle();
 
@@ -118,14 +119,33 @@ export async function recordOfflinePayment(formData: FormData) {
     throw new Error("You don't have access to this change order.");
   }
 
-  if (!["pending", "approved"].includes(changeOrder.status)) {
+  if (["paid", "cash", "check", "financed"].includes(changeOrder.status)) {
     throw new Error("This change order has already been settled.");
+  }
+
+  if (changeOrder.status === "declined") {
+    throw new Error("This change order was declined and can't be marked paid.");
+  }
+
+  // Settlement rule: offline payment (cash/check/financed) can only be
+  // recorded once BOTH the client's signature and the provider's
+  // countersignature are in — same requirement as online payment. A
+  // pending (unsigned) or client-signed-only order is not eligible yet.
+  if (
+    changeOrder.status !== "approved" ||
+    !changeOrder.client_signed_at ||
+    !changeOrder.provider_signed_at
+  ) {
+    throw new Error(
+      "Both the client's signature and your countersignature are required before you can record payment."
+    );
   }
 
   const { error } = await supabaseAdmin
     .from("change_orders")
     .update({ status: method, payment_reference: reference })
-    .eq("id", changeOrderId);
+    .eq("id", changeOrderId)
+    .eq("status", "approved");
 
   if (error) {
     throw new Error(`Could not record payment: ${error.message}`);
@@ -201,4 +221,68 @@ export async function countersignChangeOrder(formData: FormData) {
 
   revalidatePath("/dashboard");
   revalidatePath(`/dashboard/projects/${changeOrder.project_id}`);
+}
+
+// Kills client access via the project's current portal link without
+// issuing a replacement — e.g. the project is done/cancelled and the
+// provider wants the old link dead. RLS already scopes `projects` UPDATE to
+// rows the caller owns, same trust model createProject already relies on.
+export async function revokePortalLink(formData: FormData) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    throw new Error("You must be signed in.");
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  if (!projectId) {
+    throw new Error("Missing project.");
+  }
+
+  const { error } = await supabase
+    .from("projects")
+    .update({ portal_token_revoked_at: new Date().toISOString() })
+    .eq("id", projectId);
+
+  if (error) {
+    throw new Error(`Could not revoke portal link: ${error.message}`);
+  }
+
+  revalidatePath(`/dashboard/projects/${projectId}`);
+  revalidatePath("/dashboard");
+}
+
+// Issues a fresh unique_token, immediately invalidating the old portal URL
+// and reactivating access (clears any prior revocation) under a new one —
+// how a provider recovers from a leaked/accidentally-shared link, not just
+// a deliberately revoked one.
+export async function rotatePortalLink(formData: FormData) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    throw new Error("You must be signed in.");
+  }
+
+  const projectId = String(formData.get("projectId") ?? "");
+  if (!projectId) {
+    throw new Error("Missing project.");
+  }
+
+  const { error } = await supabase
+    .from("projects")
+    .update({ unique_token: randomUUID(), portal_token_revoked_at: null })
+    .eq("id", projectId);
+
+  if (error) {
+    throw new Error(`Could not rotate portal link: ${error.message}`);
+  }
+
+  revalidatePath(`/dashboard/projects/${projectId}`);
+  revalidatePath("/dashboard");
 }

@@ -16,10 +16,12 @@ export type Database = {
     Tables: {
       change_orders: {
         Row: {
+          application_fee_amount: number | null
           client_signature_name: string | null
           client_signed_at: string | null
           cost: number
           created_at: string
+          currency: string | null
           description: string
           due_date: string | null
           id: string
@@ -30,16 +32,20 @@ export type Database = {
           signature_data: string | null
           signed_at: string | null
           status: string
+          stripe_charge_id: string | null
+          stripe_checkout_session_id: string | null
           stripe_connected_account_id: string | null
           stripe_payment_intent_id: string | null
           terms_accepted_at: string | null
           terms_version_id: string | null
         }
         Insert: {
+          application_fee_amount?: number | null
           client_signature_name?: string | null
           client_signed_at?: string | null
           cost: number
           created_at?: string
+          currency?: string | null
           description: string
           due_date?: string | null
           id?: string
@@ -50,16 +56,20 @@ export type Database = {
           signature_data?: string | null
           signed_at?: string | null
           status?: string
+          stripe_charge_id?: string | null
+          stripe_checkout_session_id?: string | null
           stripe_connected_account_id?: string | null
           stripe_payment_intent_id?: string | null
           terms_accepted_at?: string | null
           terms_version_id?: string | null
         }
         Update: {
+          application_fee_amount?: number | null
           client_signature_name?: string | null
           client_signed_at?: string | null
           cost?: number
           created_at?: string
+          currency?: string | null
           description?: string
           due_date?: string | null
           id?: string
@@ -70,6 +80,8 @@ export type Database = {
           signature_data?: string | null
           signed_at?: string | null
           status?: string
+          stripe_charge_id?: string | null
+          stripe_checkout_session_id?: string | null
           stripe_connected_account_id?: string | null
           stripe_payment_intent_id?: string | null
           terms_accepted_at?: string | null
@@ -98,6 +110,7 @@ export type Database = {
           client_name: string
           created_at: string
           id: string
+          portal_token_revoked_at: string | null
           property_address: string | null
           unique_token: string
           user_id: string
@@ -107,6 +120,7 @@ export type Database = {
           client_name: string
           created_at?: string
           id?: string
+          portal_token_revoked_at?: string | null
           property_address?: string | null
           unique_token?: string
           user_id: string
@@ -116,6 +130,7 @@ export type Database = {
           client_name?: string
           created_at?: string
           id?: string
+          portal_token_revoked_at?: string | null
           property_address?: string | null
           unique_token?: string
           user_id?: string
@@ -173,8 +188,10 @@ export type Database = {
           id: string
           stripe_account_id: string | null
           stripe_connect_charges_enabled: boolean
+          stripe_connect_event_at: string | null
           stripe_connect_payouts_enabled: boolean
           stripe_customer_id: string | null
+          stripe_subscription_event_at: string | null
           stripe_subscription_id: string | null
           subscription_status: string
           subscription_tier: string | null
@@ -190,8 +207,10 @@ export type Database = {
           id: string
           stripe_account_id?: string | null
           stripe_connect_charges_enabled?: boolean
+          stripe_connect_event_at?: string | null
           stripe_connect_payouts_enabled?: boolean
           stripe_customer_id?: string | null
+          stripe_subscription_event_at?: string | null
           stripe_subscription_id?: string | null
           subscription_status?: string
           subscription_tier?: string | null
@@ -207,8 +226,10 @@ export type Database = {
           id?: string
           stripe_account_id?: string | null
           stripe_connect_charges_enabled?: boolean
+          stripe_connect_event_at?: string | null
           stripe_connect_payouts_enabled?: boolean
           stripe_customer_id?: string | null
+          stripe_subscription_event_at?: string | null
           stripe_subscription_id?: string | null
           subscription_status?: string
           subscription_tier?: string | null
@@ -216,6 +237,27 @@ export type Database = {
           terms_accepted_at?: string | null
           terms_version?: string | null
           trial_ends_at?: string | null
+        }
+        Relationships: []
+      }
+      stripe_webhook_events: {
+        Row: {
+          endpoint: string
+          id: string
+          received_at: string
+          type: string
+        }
+        Insert: {
+          endpoint: string
+          id: string
+          received_at?: string
+          type: string
+        }
+        Update: {
+          endpoint?: string
+          id?: string
+          received_at?: string
+          type?: string
         }
         Relationships: []
       }

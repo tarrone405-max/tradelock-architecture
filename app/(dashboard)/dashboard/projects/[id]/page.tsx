@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { Download } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
-import { createChangeOrder } from "../../actions";
+import { createChangeOrder, revokePortalLink, rotatePortalLink } from "../../actions";
 import StatusBadge from "@/components/StatusBadge";
 import ExecutionStatusBadge from "@/components/ExecutionStatusBadge";
 import OfflinePaymentMenu from "@/components/OfflinePaymentMenu";
@@ -21,7 +21,7 @@ export default async function ProjectDetailPage({
 
   const { data: project } = await supabase
     .from("projects")
-    .select("id, client_name, property_address, unique_token")
+    .select("id, client_name, property_address, unique_token, portal_token_revoked_at")
     .eq("id", id)
     .maybeSingle();
 
@@ -39,6 +39,7 @@ export default async function ProjectDetailPage({
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
   const portalUrl = `${siteUrl}/p/${project.unique_token}`;
+  const portalRevoked = !!project.portal_token_revoked_at;
 
   return (
     <div className="space-y-6">
@@ -47,9 +48,37 @@ export default async function ProjectDetailPage({
         {project.property_address && (
           <p className="text-sm text-gray-900">{project.property_address}</p>
         )}
-        <p className="mt-2 break-all rounded-md bg-gray-100 p-2 text-xs font-medium text-gray-900">
-          {portalUrl}
-        </p>
+        {portalRevoked ? (
+          <p className="mt-2 rounded-md bg-red-50 p-2 text-xs font-medium text-red-700">
+            Portal link revoked — your client can no longer view this project.
+          </p>
+        ) : (
+          <p className="mt-2 break-all rounded-md bg-gray-100 p-2 text-xs font-medium text-gray-900">
+            {portalUrl}
+          </p>
+        )}
+        <div className="mt-2 flex items-center gap-3">
+          <form action={rotatePortalLink}>
+            <input type="hidden" name="projectId" value={project.id} />
+            <button
+              type="submit"
+              className="text-xs font-medium text-gray-900 underline underline-offset-2 hover:text-gray-700"
+            >
+              {portalRevoked ? "Generate new link" : "Rotate link"}
+            </button>
+          </form>
+          {!portalRevoked && (
+            <form action={revokePortalLink}>
+              <input type="hidden" name="projectId" value={project.id} />
+              <button
+                type="submit"
+                className="text-xs font-medium text-red-600 underline underline-offset-2 hover:text-red-700"
+              >
+                Revoke link
+              </button>
+            </form>
+          )}
+        </div>
       </div>
 
       <section>
@@ -89,7 +118,11 @@ export default async function ProjectDetailPage({
         ) : (
           <ul className="space-y-3">
             {changeOrders.map((co) => {
-              const canRecordPayment = co.status === "pending" || co.status === "approved";
+              // Matches the settlement rule enforced server-side in
+              // recordOfflinePayment: both signatures must be in before an
+              // offline payment can be recorded.
+              const canRecordPayment =
+                co.status === "approved" && !!co.client_signed_at && !!co.provider_signed_at;
               const hasRecord = co.status !== "pending";
               const showExecutionStatus = co.status !== "declined";
               const needsCountersign = !!co.client_signed_at && !co.provider_signed_at;

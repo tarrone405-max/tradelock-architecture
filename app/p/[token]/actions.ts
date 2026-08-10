@@ -23,6 +23,10 @@ async function getProjectByToken(token: string) {
     .from("projects")
     .select("id, user_id, client_name, client_email, unique_token")
     .eq("unique_token", token)
+    // A revoked or rotated-away token must behave exactly like an invalid
+    // one for every mutation in this file — see
+    // app/(dashboard)/dashboard/actions.ts's revokePortalLink/rotatePortalLink.
+    .is("portal_token_revoked_at", null)
     .maybeSingle();
   return project;
 }
@@ -186,7 +190,7 @@ export async function payChangeOrder(formData: FormData) {
   const [{ data: changeOrder }, { data: provider }] = await Promise.all([
     supabaseAdmin
       .from("change_orders")
-      .select("id, description, cost, status")
+      .select("id, description, cost, status, client_signed_at, provider_signed_at")
       .eq("id", changeOrderId)
       .eq("project_id", project.id)
       .maybeSingle(),
@@ -197,8 +201,19 @@ export async function payChangeOrder(formData: FormData) {
       .maybeSingle(),
   ]);
 
-  if (!changeOrder || changeOrder.status !== "approved") {
-    throw new Error("This change order isn't ready for payment.");
+  // Settlement rule: a change order can only be paid — online or off —
+  // once BOTH parties have signed. status='approved' alone only means the
+  // client signed; the provider's countersignature (provider_signed_at,
+  // set by countersignChangeOrder) is a separate, required gate.
+  if (
+    !changeOrder ||
+    changeOrder.status !== "approved" ||
+    !changeOrder.client_signed_at ||
+    !changeOrder.provider_signed_at
+  ) {
+    throw new Error(
+      "This change order isn't ready for payment yet — it needs both your signature and your contractor's countersignature first."
+    );
   }
 
   // Payments always route directly to the provider's own connected Stripe
