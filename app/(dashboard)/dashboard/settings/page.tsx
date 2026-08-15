@@ -4,6 +4,7 @@ import {
   openStripeExpressDashboard,
   startStripeConnectOnboarding,
 } from "@/app/actions/connect";
+import StripeActionButton from "@/components/StripeActionButton";
 
 export default async function SettingsPage() {
   const connectStatus = await getConnectStatus();
@@ -57,14 +58,12 @@ export default async function SettingsPage() {
               Connected — ready to accept payments
             </span>
 
-            <form action={openStripeExpressDashboard}>
-              <button
-                type="submit"
-                className="text-xs font-semibold text-green-800 underline underline-offset-2 hover:text-green-900"
-              >
-                Manage on Stripe
-              </button>
-            </form>
+            <StripeActionButton
+              action={openStripeExpressDashboard}
+              label="Manage on Stripe"
+              pendingLabel="Opening…"
+              className="text-xs font-semibold text-green-800 underline underline-offset-2 hover:text-green-900"
+            />
           </div>
         ) : (
           <div className="space-y-3">
@@ -82,16 +81,16 @@ export default async function SettingsPage() {
               </div>
             )}
 
-            <form action={startStripeConnectOnboarding}>
-              <button
-                type="submit"
-                className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-gray-800"
-              >
-                {hasStripeAccount
+            <StripeActionButton
+              action={startStripeConnectOnboarding}
+              label={
+                hasStripeAccount
                   ? "Finish setting up payments"
-                  : "Connect Stripe account"}
-              </button>
-            </form>
+                  : "Connect Stripe account"
+              }
+              pendingLabel="Redirecting to Stripe…"
+              className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-gray-800"
+            />
           </div>
         )}
       </section>

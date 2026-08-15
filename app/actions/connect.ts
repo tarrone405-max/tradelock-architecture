@@ -5,7 +5,16 @@ import { getStripe } from "@/lib/stripe";
 import { createClient } from "@/lib/supabase/server";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 
-export async function startStripeConnectOnboarding() {
+// Shared by every Stripe-Connect-triggering action on the settings page —
+// these return an error instead of throwing, since a thrown Error from an
+// action bound to a <form action={...}> has no error boundary in Next.js
+// and takes down the whole page instead of showing an inline message.
+export type ConnectActionState = { error: string | null };
+
+export async function startStripeConnectOnboarding(
+  _prevState: ConnectActionState,
+  _formData: FormData
+): Promise<ConnectActionState> {
   const stripe = getStripe();
   const supabaseAdmin = getSupabaseAdmin();
   const supabase = await createClient();
@@ -15,9 +24,9 @@ export async function startStripeConnectOnboarding() {
   } = await supabase.auth.getUser();
 
   if (!user || !user.email) {
-    throw new Error(
-      "You must be signed in to connect a payment account."
-    );
+    return {
+      error: "You must be signed in to connect a payment account.",
+    };
   }
 
   const { data: profile, error: profileError } = await supabaseAdmin
@@ -27,9 +36,9 @@ export async function startStripeConnectOnboarding() {
     .single();
 
   if (profileError) {
-    throw new Error(
-      `Could not load payment profile: ${profileError.message}`
-    );
+    return {
+      error: `Could not load payment profile: ${profileError.message}`,
+    };
   }
 
   let accountId = profile?.stripe_account_id ?? null;
@@ -50,87 +59,89 @@ export async function startStripeConnectOnboarding() {
    * The recipient configuration is required for our destination
    * charge flow.
    */
-  if (!accountId) {
-    const account = await stripe.v2.core.accounts.create({
-      display_name: "TradeLock Provider",
-      contact_email: user.email,
+  let accountLinkUrl: string;
 
-      identity: {
-        country: "us",
-      },
+  try {
+    if (!accountId) {
+      const account = await stripe.v2.core.accounts.create({
+        display_name: "TradeLock Provider",
+        contact_email: user.email,
 
-      dashboard: "express",
-
-      defaults: {
-        responsibilities: {
-          fees_collector: "application",
-          losses_collector: "application",
+        identity: {
+          country: "us",
         },
-      },
 
-      configuration: {
-        merchant: {
-          capabilities: {
-            card_payments: {
-              requested: true,
-            },
+        dashboard: "express",
+
+        defaults: {
+          responsibilities: {
+            fees_collector: "application",
+            losses_collector: "application",
           },
         },
 
-        recipient: {
-          capabilities: {
-            stripe_balance: {
-              stripe_transfers: {
+        configuration: {
+          merchant: {
+            capabilities: {
+              card_payments: {
                 requested: true,
               },
             },
           },
+
+          recipient: {
+            capabilities: {
+              stripe_balance: {
+                stripe_transfers: {
+                  requested: true,
+                },
+              },
+            },
+          },
         },
-      },
 
-      metadata: {
-        supabase_user_id: user.id,
-      },
+        metadata: {
+          supabase_user_id: user.id,
+        },
 
-      include: [
-        "configuration.merchant",
-        "configuration.recipient",
-        "identity",
-        "requirements",
-      ],
-    });
+        include: [
+          "configuration.merchant",
+          "configuration.recipient",
+          "identity",
+          "requirements",
+        ],
+      });
 
-    accountId = account.id;
+      accountId = account.id;
 
-    const { error: updateError } = await supabaseAdmin
-      .from("users")
-      .update({
-        stripe_account_id: accountId,
-      })
-      .eq("id", user.id);
+      const { error: updateError } = await supabaseAdmin
+        .from("users")
+        .update({
+          stripe_account_id: accountId,
+        })
+        .eq("id", user.id);
 
-    if (updateError) {
-      throw new Error(
-        `Could not save Stripe account: ${updateError.message}`
-      );
+      if (updateError) {
+        return {
+          error: `Could not save Stripe account: ${updateError.message}`,
+        };
+      }
     }
-  }
 
-  /*
-   * ------------------------------------------------------------
-   * IMPORTANT FOR EXISTING ACCOUNTS
-   * ------------------------------------------------------------
-   *
-   * Your current Stripe account was created BEFORE we added the
-   * recipient configuration.
-   *
-   * Therefore, simply sending the provider through onboarding
-   * again does NOT automatically fix the account.
-   *
-   * We explicitly add/request the recipient transfer capability
-   * here.
-   */
-  try {
+    /*
+     * ------------------------------------------------------------
+     * IMPORTANT FOR EXISTING ACCOUNTS
+     * ------------------------------------------------------------
+     *
+     * Your current Stripe account was created BEFORE we added the
+     * recipient configuration.
+     *
+     * Therefore, simply sending the provider through onboarding
+     * again does NOT automatically fix the account.
+     *
+     * We explicitly add/request the recipient transfer capability
+     * here.
+     */
     await stripe.v2.core.accounts.update(accountId, {
       configuration: {
         recipient: {
@@ -151,27 +162,16 @@ export async function startStripeConnectOnboarding() {
         "requirements",
       ],
     });
-  } catch (error) {
-    console.error(
-      "Failed to request Stripe recipient transfer capability:",
-      error
-    );
 
-    throw new Error(
-      "Stripe could not enable the payment transfer capability on this account."
-    );
-  }
+    const siteUrl =
+      process.env.NEXT_PUBLIC_SITE_URL ??
+      "http://localhost:3000";
 
-  const siteUrl =
-    process.env.NEXT_PUBLIC_SITE_URL ??
-    "http://localhost:3000";
-
-  /*
-   * Send the provider through Stripe onboarding for BOTH
-   * merchant and recipient configuration.
-   */
-  const accountLink =
-    await stripe.v2.core.accountLinks.create({
+    /*
+     * Send the provider through Stripe onboarding for BOTH
+     * merchant and recipient configuration.
+     */
+    const accountLink = await stripe.v2.core.accountLinks.create({
       account: accountId,
 
       use_case: {
@@ -192,7 +192,17 @@ export async function startStripeConnectOnboarding() {
       },
     });
 
-  redirect(accountLink.url);
+    accountLinkUrl = accountLink.url;
+  } catch (error) {
+    console.error("Stripe Connect onboarding failed:", error);
+
+    return {
+      error:
+        "Stripe couldn't start onboarding for this account. Please try again.",
+    };
+  }
+
+  redirect(accountLinkUrl);
 }
 
 
@@ -201,7 +211,10 @@ export async function startStripeConnectOnboarding() {
  * OPEN STRIPE EXPRESS DASHBOARD
  * --------------------------------------------------------------
  */
-export async function openStripeExpressDashboard() {
+export async function openStripeExpressDashboard(
+  _prevState: ConnectActionState,
+  _formData: FormData
+): Promise<ConnectActionState> {
   const stripe = getStripe();
   const supabaseAdmin = getSupabaseAdmin();
   const supabase = await createClient();
@@ -211,7 +224,7 @@ export async function openStripeExpressDashboard() {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    throw new Error("You must be signed in.");
+    return { error: "You must be signed in." };
   }
 
   const { data: profile } = await supabaseAdmin
@@ -221,17 +234,24 @@ export async function openStripeExpressDashboard() {
     .single();
 
   if (!profile?.stripe_account_id) {
-    throw new Error(
-      "No connected Stripe account found."
-    );
+    return { error: "No connected Stripe account found." };
   }
 
-  const loginLink =
-    await stripe.accounts.createLoginLink(
+  let loginLinkUrl: string;
+
+  try {
+    const loginLink = await stripe.accounts.createLoginLink(
       profile.stripe_account_id
     );
+    loginLinkUrl = loginLink.url;
+  } catch (error) {
+    console.error("Failed to create Stripe Express dashboard link:", error);
+    return {
+      error: "Could not open your Stripe dashboard. Please try again.",
+    };
+  }
 
-  redirect(loginLink.url);
+  redirect(loginLinkUrl);
 }
 
 
