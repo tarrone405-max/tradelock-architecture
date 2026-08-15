@@ -6,6 +6,7 @@ import {
   Clock,
   Landmark,
   Receipt,
+  Undo2,
   XCircle,
 } from "lucide-react";
 
@@ -41,6 +42,11 @@ const CONFIG: Record<string, { style: string; label: string; icon: typeof Circle
     style: "bg-violet-50 text-violet-700 ring-violet-600/20",
     label: "Financed / Lender Approved",
     icon: Landmark,
+  },
+  refunded: {
+    style: "bg-gray-100 text-gray-700 ring-gray-500/20",
+    label: "Refunded",
+    icon: Undo2,
   },
   none: { style: "bg-gray-100 text-gray-900 ring-gray-500/10", label: "No activity", icon: Circle },
 };

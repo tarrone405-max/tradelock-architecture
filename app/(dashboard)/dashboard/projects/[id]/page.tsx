@@ -1,15 +1,20 @@
 import { notFound } from "next/navigation";
-import { Download } from "lucide-react";
+import { AlertTriangle, Download, Lock, Star } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
-import { createChangeOrder, revokePortalLink, rotatePortalLink } from "../../actions";
+import {
+  revokePortalLink,
+  rotatePortalLink,
+  sendProviderMessage,
+} from "../../actions";
+import { getUserPlan } from "@/lib/planAccess";
 import StatusBadge from "@/components/StatusBadge";
 import ExecutionStatusBadge from "@/components/ExecutionStatusBadge";
 import OfflinePaymentMenu from "@/components/OfflinePaymentMenu";
+import RefundMenu from "@/components/RefundMenu";
 import CountersignForm from "@/components/CountersignForm";
-import BackButton from "@/components/BackButton";
-
-const inputClass =
-  "mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900";
+import NewChangeOrderForm from "@/components/NewChangeOrderForm";
+import MessageThread from "@/components/MessageThread";
+import AuditLogTimeline from "@/components/AuditLogTimeline";
 
 export default async function ProjectDetailPage({
   params,
@@ -18,6 +23,16 @@ export default async function ProjectDetailPage({
 }) {
   const { id } = await params;
   const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    throw new Error("You must be signed in.");
+  }
+
+  const plan = await getUserPlan(user.id);
 
   const { data: project } = await supabase
     .from("projects")
@@ -29,13 +44,25 @@ export default async function ProjectDetailPage({
     notFound();
   }
 
-  const { data: changeOrders } = await supabase
-    .from("change_orders")
-    .select(
-      "id, description, cost, status, created_at, due_date, client_signed_at, provider_signed_at"
-    )
-    .eq("project_id", project.id)
-    .order("created_at", { ascending: false });
+  const [{ data: changeOrders }, { data: messages }, { data: review }] = await Promise.all([
+    supabase
+      .from("change_orders")
+      .select(
+        "id, description, cost, status, created_at, due_date, client_signed_at, provider_signed_at, stripe_payment_intent_id, refunded_amount, refunded_at, dispute_status, disputed_at, paid_at"
+      )
+      .eq("project_id", project.id)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("messages")
+      .select("id, sender_type, body, created_at")
+      .eq("project_id", project.id)
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("reviews")
+      .select("rating, comment, created_at")
+      .eq("project_id", project.id)
+      .maybeSingle(),
+  ]);
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
   const portalUrl = `${siteUrl}/p/${project.unique_token}`;
@@ -83,32 +110,7 @@ export default async function ProjectDetailPage({
 
       <section>
         <h2 className="mb-3 text-base font-semibold text-gray-900">New change order</h2>
-        <form action={createChangeOrder} className="space-y-3 rounded-lg border bg-white p-4">
-          <input type="hidden" name="projectId" value={project.id} />
-          <div>
-            <label className="block text-sm font-medium text-gray-900">Description</label>
-            <textarea name="description" required rows={3} className={inputClass} />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-900">Cost ($)</label>
-            <input type="number" name="cost" min="0" step="0.01" required className={inputClass} />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-900">
-              Payment due date <span className="text-gray-500">(optional)</span>
-            </label>
-            <input type="date" name="dueDate" className={inputClass} />
-          </div>
-          <div className="flex items-center justify-between pt-4">
-            <BackButton />
-            <button
-              type="submit"
-              className="inline-flex items-center rounded-md border border-transparent bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-900"
-            >
-              Confirm change order
-            </button>
-          </div>
-        </form>
+        <NewChangeOrderForm projectId={project.id} />
       </section>
 
       <section>
@@ -126,6 +128,25 @@ export default async function ProjectDetailPage({
               const hasRecord = co.status !== "pending";
               const showExecutionStatus = co.status !== "declined";
               const needsCountersign = !!co.client_signed_at && !co.provider_signed_at;
+
+              const costCents = Math.round(Number(co.cost) * 100);
+              const refundedCents = co.refunded_amount ?? 0;
+              const remainingCents = costCents - refundedCents;
+              // Refunds are a Pro+ capability (lib/plans.ts's
+              // advancedPayments flag) — Free providers see a locked hint
+              // instead of the action and have to go through Stripe support
+              // directly for now.
+              const canRefund =
+                plan.features.advancedPayments &&
+                co.status === "paid" &&
+                !!co.stripe_payment_intent_id &&
+                remainingCents > 0;
+              const refundLocked =
+                !plan.features.advancedPayments &&
+                co.status === "paid" &&
+                !!co.stripe_payment_intent_id &&
+                remainingCents > 0;
+
               return (
                 <li key={co.id} className="rounded-lg border bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -145,6 +166,11 @@ export default async function ProjectDetailPage({
                       <p className="text-sm font-medium text-gray-900">
                         ${Number(co.cost).toFixed(2)}
                       </p>
+                      {refundedCents > 0 && (
+                        <p className="text-xs text-gray-500">
+                          ${(refundedCents / 100).toFixed(2)} refunded
+                        </p>
+                      )}
                       {co.due_date && (
                         <p className="text-xs text-gray-500">
                           Due {new Date(co.due_date + "T00:00:00").toLocaleDateString()}
@@ -162,15 +188,74 @@ export default async function ProjectDetailPage({
                         </a>
                       )}
                       {canRecordPayment && <OfflinePaymentMenu changeOrderId={co.id} />}
+                      {canRefund && (
+                        <RefundMenu changeOrderId={co.id} remainingCents={remainingCents} />
+                      )}
+                      {refundLocked && (
+                        <span
+                          title="Refunds are a Pro feature — upgrade to issue refunds from TradeLock."
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-gray-200 text-gray-400"
+                        >
+                          <Lock className="h-3.5 w-3.5" />
+                        </span>
+                      )}
                     </div>
                   </div>
+                  {co.dispute_status && (
+                    <div className="mt-2 flex items-center gap-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      Payment disputed with the bank — status: {co.dispute_status.replaceAll("_", " ")}
+                    </div>
+                  )}
                   {needsCountersign && <CountersignForm changeOrderId={co.id} />}
+                  {plan.features.auditLogs && hasRecord && (
+                    <AuditLogTimeline
+                      events={[
+                        { label: "Created", at: co.created_at },
+                        { label: "Client signed", at: co.client_signed_at },
+                        { label: "Provider countersigned", at: co.provider_signed_at },
+                        { label: "Paid", at: co.paid_at },
+                        { label: "Disputed", at: co.disputed_at },
+                        { label: "Refunded", at: co.refunded_at },
+                      ]}
+                    />
+                  )}
                 </li>
               );
             })}
           </ul>
         )}
       </section>
+
+      {review && (
+        <section className="rounded-xl border border-gray-200 bg-white p-4">
+          <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+            <Star className="h-4 w-4 text-amber-500" />
+            Client review
+          </h2>
+          <div className="flex items-center gap-1">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Star
+                key={index}
+                className={`h-4 w-4 ${
+                  index < review.rating ? "fill-amber-400 text-amber-400" : "text-gray-200"
+                }`}
+              />
+            ))}
+          </div>
+          {review.comment && <p className="mt-2 text-sm text-gray-900">{review.comment}</p>}
+          <p className="mt-1 text-xs text-gray-500">
+            {new Date(review.created_at).toLocaleDateString()}
+          </p>
+        </section>
+      )}
+
+      <MessageThread
+        messages={messages ?? []}
+        viewerType="provider"
+        action={sendProviderMessage}
+        hiddenFields={{ projectId: project.id }}
+      />
     </div>
   );
 }

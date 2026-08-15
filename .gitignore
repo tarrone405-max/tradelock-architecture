@@ -37,6 +37,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# supabase CLI session files (contain live DB connection string/project ref)
+supabase/.temp/
+
 # stripe cli
 stripe.exe
 

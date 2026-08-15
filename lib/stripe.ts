@@ -17,14 +17,3 @@ export function getStripe(): Stripe {
   }
   return stripeClient;
 }
-
-// Optional platform fee taken out of each direct change-order payment via
-// Stripe Connect's `application_fee_amount`, expressed in basis points
-// (e.g. "250" = 2.5%) through STRIPE_APPLICATION_FEE_BPS. Unset/0 means the
-// provider keeps 100% of the charge — that's the default until pricing is
-// decided.
-export function getApplicationFeeAmount(unitAmountCents: number): number | undefined {
-  const bps = Number(process.env.STRIPE_APPLICATION_FEE_BPS ?? "0");
-  if (!bps || bps <= 0) return undefined;
-  return Math.round((unitAmountCents * bps) / 10000);
-}

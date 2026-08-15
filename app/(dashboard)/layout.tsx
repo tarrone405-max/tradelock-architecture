@@ -1,9 +1,18 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { LogOut, Settings } from "lucide-react";
+import {
+  BarChart3,
+  CreditCard,
+  LogOut,
+  MessageSquareWarning,
+  Settings,
+} from "lucide-react";
+
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "@/app/actions/auth";
 import { TRIAL_DAYS } from "@/lib/trial";
+
+import BackToDashboard from "@/components/BackToDashboard";
 
 export default async function DashboardLayout({
   children,
@@ -11,17 +20,23 @@ export default async function DashboardLayout({
   children: React.ReactNode;
 }) {
   const supabase = await createClient();
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  // ==========================================================
+  // AUTHENTICATION
+  // ==========================================================
 
   if (!user) {
     redirect("/login");
   }
 
-  // Safety net for accounts whose profile row wasn't created at sign-up
-  // time (e.g. email confirmation was required, so no session existed yet
-  // when app/actions/auth.ts:signUp ran). Own-row insert, RLS-permitted.
+  // ==========================================================
+  // PROFILE SAFETY NET
+  // ==========================================================
+
   const { data: profile } = await supabase
     .from("users")
     .select("id")
@@ -29,38 +44,118 @@ export default async function DashboardLayout({
     .maybeSingle();
 
   if (!profile) {
-    const trialEndsAt = new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    // terms_accepted* / terms_version were carried in auth user_metadata
-    // from the original signup submission (see app/actions/auth.ts) — this
-    // deferred insert only runs when email confirmation pushed profile
-    // creation to a later request, so it has no form data of its own.
+    const trialEndsAt = new Date(
+      Date.now() +
+        TRIAL_DAYS *
+          24 *
+          60 *
+          60 *
+          1000
+    ).toISOString();
+
     await supabase.from("users").insert({
       id: user.id,
+
       email: user.email,
-      company_name: (user.user_metadata?.company_name as string | undefined) ?? null,
-      trial_ends_at: trialEndsAt,
-      terms_accepted: (user.user_metadata?.terms_accepted as boolean | undefined) ?? false,
-      terms_accepted_at: (user.user_metadata?.terms_accepted_at as string | undefined) ?? null,
-      terms_version: (user.user_metadata?.terms_version as string | undefined) ?? null,
+
+      company_name:
+        (user.user_metadata
+          ?.company_name as
+          | string
+          | undefined) ?? null,
+
+      trial_ends_at:
+        trialEndsAt,
+
+      terms_accepted:
+        (user.user_metadata
+          ?.terms_accepted as
+          | boolean
+          | undefined) ?? false,
+
+      terms_accepted_at:
+        (user.user_metadata
+          ?.terms_accepted_at as
+          | string
+          | undefined) ?? null,
+
+      terms_version:
+        (user.user_metadata
+          ?.terms_version as
+          | string
+          | undefined) ?? null,
     });
   }
 
+  // ==========================================================
+  // DASHBOARD LAYOUT
+  // ==========================================================
+
   return (
     <div className="min-h-screen bg-gray-50">
+      {/* ======================================================
+          HEADER
+          ====================================================== */}
+
       <header className="flex items-center justify-between border-b bg-white px-4 py-3 sm:px-6">
-        <span className="text-lg font-semibold text-gray-900">TradeLock</span>
+        {/* Brand */}
+
+        <Link
+          href="/dashboard"
+          className="text-lg font-semibold text-gray-900 transition-colors hover:text-gray-700"
+        >
+          TradeLock
+        </Link>
+
+        {/* Navigation */}
+
         <div className="flex items-center gap-4">
+          {/* Settings */}
+
           <Link
             href="/dashboard/settings"
-            className="flex items-center gap-1.5 text-sm font-medium text-gray-900 hover:text-gray-900"
+            className="flex items-center gap-1.5 text-sm font-medium text-gray-900 transition-colors hover:text-gray-600"
           >
             <Settings className="h-4 w-4" />
             Settings
           </Link>
+
+          {/* Reports */}
+
+          <Link
+            href="/dashboard/reports"
+            className="flex items-center gap-1.5 text-sm font-medium text-gray-900 transition-colors hover:text-gray-600"
+          >
+            <BarChart3 className="h-4 w-4" />
+            Reports
+          </Link>
+
+          {/* Billing */}
+
+          <Link
+            href="/dashboard/billing"
+            className="flex items-center gap-1.5 text-sm font-medium text-gray-900 transition-colors hover:text-gray-600"
+          >
+            <CreditCard className="h-4 w-4" />
+            Billing
+          </Link>
+
+          {/* Feedback */}
+
+          <Link
+            href="/dashboard/feedback"
+            className="flex items-center gap-1.5 text-sm font-medium text-gray-900 transition-colors hover:text-gray-600"
+          >
+            <MessageSquareWarning className="h-4 w-4" />
+            Feedback
+          </Link>
+
+          {/* Sign out */}
+
           <form action={signOut}>
             <button
               type="submit"
-              className="flex items-center gap-1.5 text-sm font-medium text-gray-900 hover:text-gray-900"
+              className="flex items-center gap-1.5 text-sm font-medium text-gray-900 transition-colors hover:text-gray-600"
             >
               <LogOut className="h-4 w-4" />
               Sign out
@@ -68,7 +163,20 @@ export default async function DashboardLayout({
           </form>
         </div>
       </header>
-      <main className="mx-auto max-w-3xl px-4 py-6 sm:px-6">{children}</main>
+
+      {/* ======================================================
+          MAIN CONTENT
+          ====================================================== */}
+
+      <main className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
+        {/* Back to Dashboard */}
+
+        <BackToDashboard />
+
+        {/* Current dashboard page */}
+
+        {children}
+      </main>
     </div>
   );
 }

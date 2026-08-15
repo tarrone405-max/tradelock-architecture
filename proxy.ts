@@ -37,32 +37,13 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Hard entitlement gate: active subscription or still-valid trial. The
-  // billing page itself is always exempt, or there'd be no way to reach the
-  // Subscribe button. A missing profile row (brand-new account, not yet
-  // synced by app/(dashboard)/layout.tsx's fallback insert) fails OPEN —
-  // it gets a real trial_ends_at on its very next request once that insert
-  // runs, so there's nothing to gate yet.
-  if (request.nextUrl.pathname !== "/dashboard/billing") {
-    const { data: profile } = await supabase
-      .from("users")
-      .select("subscription_status, trial_ends_at")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (profile) {
-      const isActive = profile.subscription_status === "active";
-      const trialValid =
-        !!profile.trial_ends_at && new Date(profile.trial_ends_at).getTime() > Date.now();
-
-      if (!isActive && !trialValid) {
-        const url = request.nextUrl.clone();
-        url.pathname = "/dashboard/billing";
-        return NextResponse.redirect(url);
-      }
-    }
-  }
-
+  // No blanket entitlement gate here anymore: Free is a real, fully-entitled
+  // plan (see lib/plans.ts), not a locked/paywall state, so simply being
+  // signed in is enough to reach the dashboard — same as any paid tier.
+  // TradeLock has no paid-only feature yet; if/when one exists, gate that
+  // specific route/action against lib/plans.ts's `features` (e.g.
+  // `planHasFeature(tier, "someFeature")`) rather than reintroducing a
+  // blanket redirect here.
   return response;
 }
 

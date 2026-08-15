@@ -23,19 +23,27 @@ export type Database = {
           created_at: string
           currency: string | null
           description: string
+          disputed_at: string | null
+          dispute_status: string | null
           due_date: string | null
           id: string
+          last_reminder_sent_at: string | null
+          paid_at: string | null
           payment_reference: string | null
           project_id: string
           provider_signature_name: string | null
           provider_signed_at: string | null
+          refunded_amount: number | null
+          refunded_at: string | null
           signature_data: string | null
           signed_at: string | null
           status: string
           stripe_charge_id: string | null
           stripe_checkout_session_id: string | null
           stripe_connected_account_id: string | null
+          stripe_dispute_id: string | null
           stripe_payment_intent_id: string | null
+          stripe_refund_id: string | null
           terms_accepted_at: string | null
           terms_version_id: string | null
         }
@@ -47,19 +55,27 @@ export type Database = {
           created_at?: string
           currency?: string | null
           description: string
+          disputed_at?: string | null
+          dispute_status?: string | null
           due_date?: string | null
           id?: string
+          last_reminder_sent_at?: string | null
+          paid_at?: string | null
           payment_reference?: string | null
           project_id: string
           provider_signature_name?: string | null
           provider_signed_at?: string | null
+          refunded_amount?: number | null
+          refunded_at?: string | null
           signature_data?: string | null
           signed_at?: string | null
           status?: string
           stripe_charge_id?: string | null
           stripe_checkout_session_id?: string | null
           stripe_connected_account_id?: string | null
+          stripe_dispute_id?: string | null
           stripe_payment_intent_id?: string | null
+          stripe_refund_id?: string | null
           terms_accepted_at?: string | null
           terms_version_id?: string | null
         }
@@ -71,19 +87,27 @@ export type Database = {
           created_at?: string
           currency?: string | null
           description?: string
+          disputed_at?: string | null
+          dispute_status?: string | null
           due_date?: string | null
           id?: string
+          last_reminder_sent_at?: string | null
+          paid_at?: string | null
           payment_reference?: string | null
           project_id?: string
           provider_signature_name?: string | null
           provider_signed_at?: string | null
+          refunded_amount?: number | null
+          refunded_at?: string | null
           signature_data?: string | null
           signed_at?: string | null
           status?: string
           stripe_charge_id?: string | null
           stripe_checkout_session_id?: string | null
           stripe_connected_account_id?: string | null
+          stripe_dispute_id?: string | null
           stripe_payment_intent_id?: string | null
+          stripe_refund_id?: string | null
           terms_accepted_at?: string | null
           terms_version_id?: string | null
         }
@@ -100,6 +124,86 @@ export type Database = {
             columns: ["terms_version_id"]
             isOneToOne: false
             referencedRelation: "terms_of_service"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      feedback: {
+        Row: {
+          contact_email: string | null
+          created_at: string
+          feedback_type: string
+          id: string
+          message: string
+          project_id: string | null
+          submitted_by: string
+          user_id: string | null
+        }
+        Insert: {
+          contact_email?: string | null
+          created_at?: string
+          feedback_type: string
+          id?: string
+          message: string
+          project_id?: string | null
+          submitted_by: string
+          user_id?: string | null
+        }
+        Update: {
+          contact_email?: string | null
+          created_at?: string
+          feedback_type?: string
+          id?: string
+          message?: string
+          project_id?: string | null
+          submitted_by?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "feedback_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "feedback_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      messages: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          project_id: string
+          sender_type: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          id?: string
+          project_id: string
+          sender_type: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          project_id?: string
+          sender_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "messages_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
             referencedColumns: ["id"]
           },
         ]
@@ -193,8 +297,9 @@ export type Database = {
           stripe_customer_id: string | null
           stripe_subscription_event_at: string | null
           stripe_subscription_id: string | null
+          subscription_grace_period_started_at: string | null
           subscription_status: string
-          subscription_tier: string | null
+          subscription_tier: string
           terms_accepted: boolean
           terms_accepted_at: string | null
           terms_version: string | null
@@ -212,8 +317,9 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_subscription_event_at?: string | null
           stripe_subscription_id?: string | null
+          subscription_grace_period_started_at?: string | null
           subscription_status?: string
-          subscription_tier?: string | null
+          subscription_tier?: string
           terms_accepted?: boolean
           terms_accepted_at?: string | null
           terms_version?: string | null
@@ -231,14 +337,57 @@ export type Database = {
           stripe_customer_id?: string | null
           stripe_subscription_event_at?: string | null
           stripe_subscription_id?: string | null
+          subscription_grace_period_started_at?: string | null
           subscription_status?: string
-          subscription_tier?: string | null
+          subscription_tier?: string
           terms_accepted?: boolean
           terms_accepted_at?: string | null
           terms_version?: string | null
           trial_ends_at?: string | null
         }
         Relationships: []
+      }
+      reviews: {
+        Row: {
+          comment: string | null
+          created_at: string
+          id: string
+          project_id: string
+          rating: number
+          user_id: string
+        }
+        Insert: {
+          comment?: string | null
+          created_at?: string
+          id?: string
+          project_id: string
+          rating: number
+          user_id: string
+        }
+        Update: {
+          comment?: string | null
+          created_at?: string
+          id?: string
+          project_id?: string
+          rating?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reviews_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: true
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reviews_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       stripe_webhook_events: {
         Row: {
