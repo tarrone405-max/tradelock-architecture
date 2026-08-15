@@ -891,18 +891,21 @@ export async function sendClientMessage(formData: FormData) {
 // change order — leaving a review before any money has actually changed
 // hands wouldn't mean much.
 
-export async function submitReview(formData: FormData) {
+export async function submitReview(
+  _prevState: FeedbackActionState,
+  formData: FormData
+): Promise<FeedbackActionState> {
   const token = String(formData.get("token") ?? "");
   const ratingInput = Number(formData.get("rating"));
   const comment = String(formData.get("comment") ?? "").trim() || null;
 
   const project = await getProjectByToken(token);
   if (!project) {
-    throw new Error("Invalid or expired portal link.");
+    return { error: "Invalid or expired portal link.", success: false };
   }
 
   if (!Number.isInteger(ratingInput) || ratingInput < 1 || ratingInput > 5) {
-    throw new Error("Choose a rating between 1 and 5 stars.");
+    return { error: "Choose a rating between 1 and 5 stars.", success: false };
   }
 
   const supabaseAdmin = getSupabaseAdmin();
@@ -916,7 +919,10 @@ export async function submitReview(formData: FormData) {
     .maybeSingle();
 
   if (!hasPaidOrder) {
-    throw new Error("You can leave a review once you've made a payment.");
+    return {
+      error: "You can leave a review once you've made a payment.",
+      success: false,
+    };
   }
 
   const { error } = await supabaseAdmin.from("reviews").insert({
@@ -928,9 +934,12 @@ export async function submitReview(formData: FormData) {
 
   if (error) {
     if (error.code === "23505") {
-      throw new Error("You've already left a review for this project.");
+      return {
+        error: "You've already left a review for this project.",
+        success: false,
+      };
     }
-    throw new Error(`Could not save your review: ${error.message}`);
+    return { error: `Could not save your review: ${error.message}`, success: false };
   }
 
   try {
@@ -961,6 +970,7 @@ export async function submitReview(formData: FormData) {
   }
 
   revalidatePath(`/p/${token}`);
+  return { error: null, success: true };
 }
 
 // ============================================================

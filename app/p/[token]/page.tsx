@@ -14,13 +14,13 @@ import ExecutionStatusBadge from "@/components/ExecutionStatusBadge";
 import SignaturePad from "@/components/SignaturePad";
 import MessageThread from "@/components/MessageThread";
 import FeedbackForm from "@/components/FeedbackForm";
+import ReviewForm from "@/components/ReviewForm";
 
 import {
   signChangeOrder,
   declineChangeOrder,
   payChangeOrder,
   sendClientMessage,
-  submitReview,
   submitClientFeedback,
 } from "./actions";
 
@@ -468,36 +468,7 @@ export default async function ClientPortalPage({
               <Star className="h-4 w-4 text-amber-500" />
               How was your experience with {companyName || "your contractor"}?
             </h2>
-            <form action={submitReview} className="space-y-2">
-              <input type="hidden" name="token" value={token} />
-              <div className="flex items-center gap-1">
-                {[1, 2, 3, 4, 5].map((value) => (
-                  <label key={value} className="cursor-pointer">
-                    <input
-                      type="radio"
-                      name="rating"
-                      value={value}
-                      required
-                      className="peer sr-only"
-                    />
-                    <Star className="h-6 w-6 text-gray-300 peer-checked:fill-amber-400 peer-checked:text-amber-400" />
-                  </label>
-                ))}
-              </div>
-              <textarea
-                name="comment"
-                rows={2}
-                maxLength={2000}
-                placeholder="Add a comment (optional)"
-                className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-500 focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
-              />
-              <button
-                type="submit"
-                className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-800"
-              >
-                Submit review
-              </button>
-            </form>
+            <ReviewForm token={token} />
           </div>
         )}
 
