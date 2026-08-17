@@ -11,6 +11,8 @@ import { sendEmail } from "@/lib/resend";
 import { notifyFeedbackReceived } from "@/lib/notifyFeedback";
 import NotificationEmail from "@/emails/NotificationEmail";
 import type { FeedbackActionState } from "@/components/FeedbackForm";
+import { getCurrentOrganizationId } from "@/src/core/organizations/current";
+import { asOrgClient } from "@/src/core/organizations/database.types";
 
 
 const OFFLINE_METHODS = ["cash", "check", "financed"] as const;
@@ -63,8 +65,15 @@ export async function createProject(
     return { error: "Client name is required." };
   }
 
-  const { error } = await supabase.from("projects").insert({
+  const organizationId = await getCurrentOrganizationId();
+
+  if (!organizationId) {
+    return { error: "No active organization found. Please refresh and try again." };
+  }
+
+  const { error } = await asOrgClient(supabase).from("projects").insert({
     user_id: user.id,
+    organization_id: organizationId,
     client_name: clientName,
     client_email: clientEmail,
     property_address: propertyAddress,
@@ -120,10 +129,25 @@ export async function createChangeOrder(
     return { error: "A description and a valid non-negative cost are required." };
   }
 
+  // The change order's organization_id must match its project's, not
+  // whatever happens to be the caller's active organization right now —
+  // read it off the project itself (RLS-scoped, so this also doubles as
+  // the ownership check the comment below refers to).
+  const { data: project, error: projectError } = await asOrgClient(supabase)
+    .from("projects")
+    .select("organization_id")
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (projectError || !project) {
+    return { error: "Could not find that project." };
+  }
+
   // Providers can only insert change orders on projects they own — enforced
   // by the Phase 2 RLS policy, not just this check.
-  const { error } = await supabase.from("change_orders").insert({
+  const { error } = await asOrgClient(supabase).from("change_orders").insert({
     project_id: projectId,
+    organization_id: project.organization_id,
     description,
     cost,
     due_date: dueDate,

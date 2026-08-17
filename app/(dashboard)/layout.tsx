@@ -11,6 +11,9 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "@/app/actions/auth";
 import { TRIAL_DAYS } from "@/lib/trial";
+import { ensureDefaultOrganization } from "@/src/core/organizations/service";
+import { getCurrentOrganization } from "@/src/core/organizations/current";
+import { OrganizationProvider } from "@/src/core/organizations/OrganizationProvider";
 
 import BackToDashboard from "@/components/BackToDashboard";
 
@@ -88,10 +91,29 @@ export default async function DashboardLayout({
   }
 
   // ==========================================================
+  // ORGANIZATION SAFETY NET
+  // ==========================================================
+  //
+  // Mirrors the profile safety net above: every user needs at least one
+  // organization to own their projects/change_orders/terms_of_service.
+  // The migration backfills one for every user that existed when it was
+  // applied (see supabase/migrations/20260817120000_add_organizations.sql);
+  // this covers anyone who signs up afterward, until Milestone 2's creation
+  // wizard replaces this with a real onboarding flow.
+
+  await ensureDefaultOrganization(
+    user.id,
+    (user.user_metadata?.company_name as string | undefined) ?? null
+  );
+
+  const organization = await getCurrentOrganization();
+
+  // ==========================================================
   // DASHBOARD LAYOUT
   // ==========================================================
 
   return (
+    <OrganizationProvider organization={organization}>
     <div className="min-h-screen bg-gray-50">
       {/* ======================================================
           HEADER
@@ -178,5 +200,6 @@ export default async function DashboardLayout({
         {children}
       </main>
     </div>
+    </OrganizationProvider>
   );
 }
