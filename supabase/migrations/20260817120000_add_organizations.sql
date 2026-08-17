@@ -66,19 +66,27 @@ alter table public.organizations enable row level security;
 -- being subject to that table's own RLS, which avoids the self-referential
 -- recursion a plain `using` subquery into organization_members would hit
 -- when organization_members' own policy calls this same check.
+-- language plpgsql, not sql: a plain SQL-language function has its body's
+-- table references validated against the catalog at CREATE FUNCTION time,
+-- which fails here since organization_members isn't created until section 5
+-- below. plpgsql only checks syntax at creation and defers all object
+-- lookups until the function is actually called, avoiding the forward
+-- reference entirely.
 create or replace function public.is_organization_member(target_org_id uuid)
 returns boolean
-language sql
+language plpgsql
 security definer
 set search_path = public
 stable
 as $$
-  select exists (
+begin
+  return exists (
     select 1 from public.organization_members
     where organization_id = target_org_id
       and user_id = auth.uid()
       and status = 'active'
   );
+end;
 $$;
 
 create policy "Members can view their organizations"
