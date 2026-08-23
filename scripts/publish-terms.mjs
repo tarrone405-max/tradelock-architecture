@@ -53,6 +53,25 @@ if (!provider) {
   process.exit(1);
 }
 
+// terms_of_service.organization_id is NOT NULL as of the Sprint 1
+// organizations migration — resolve the provider's organization the same
+// way createChangeOrder derives organization_id from a related row, rather
+// than assuming one.
+const { data: organization, error: organizationError } = await supabaseAdmin
+  .from("organizations")
+  .select("id")
+  .eq("owner_id", provider.id)
+  .maybeSingle();
+
+if (organizationError) {
+  console.error(`Could not look up provider's organization: ${organizationError.message}`);
+  process.exit(1);
+}
+if (!organization) {
+  console.error(`No organization found for provider ${providerEmail}.`);
+  process.exit(1);
+}
+
 const { data: current, error: currentError } = await supabaseAdmin
   .from("terms_of_service")
   .select("id, version")
@@ -80,6 +99,7 @@ const nextVersion = (current?.version ?? 0) + 1;
 
 const { error: insertError } = await supabaseAdmin.from("terms_of_service").insert({
   user_id: provider.id,
+  organization_id: organization.id,
   version: nextVersion,
   content,
   is_active: true,
