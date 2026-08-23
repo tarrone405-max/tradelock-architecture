@@ -37,13 +37,21 @@ export async function createProject(
     return { error: "You must be signed in." };
   }
 
+  const organizationId = await getCurrentOrganizationId();
+
+  if (!organizationId) {
+    return { error: "No active organization found. Please refresh and try again." };
+  }
+
   const plan = await getUserPlan(user.id);
 
   if (!plan.features.unlimitedProjects) {
-    const { count, error: countError } = await getSupabaseAdmin()
+    // Org-scoped, not user-scoped — this is a business-level limit, not a
+    // personal one, and every project belongs to an organization now.
+    const { count, error: countError } = await asOrgClient(getSupabaseAdmin())
       .from("projects")
       .select("id", { count: "exact", head: true })
-      .eq("user_id", user.id);
+      .eq("organization_id", organizationId);
 
     if (countError) {
       return { error: `Could not check project limit: ${countError.message}` };
@@ -63,12 +71,6 @@ export async function createProject(
 
   if (!clientName) {
     return { error: "Client name is required." };
-  }
-
-  const organizationId = await getCurrentOrganizationId();
-
-  if (!organizationId) {
-    return { error: "No active organization found. Please refresh and try again." };
   }
 
   const { error } = await asOrgClient(supabase).from("projects").insert({
@@ -100,26 +102,6 @@ export async function createChangeOrder(
     return { error: "You must be signed in." };
   }
 
-  const plan = await getUserPlan(user.id);
-
-  if (!plan.features.unlimitedChangeOrders) {
-    const { count, error: countError } = await getSupabaseAdmin()
-      .from("change_orders")
-      .select("id, project_id, projects!inner(user_id)", { count: "exact", head: true })
-      .eq("projects.user_id", user.id);
-
-    if (countError) {
-      return { error: `Could not check change order limit: ${countError.message}` };
-    }
-
-    if ((count ?? 0) >= 20) {
-      return {
-        error:
-          "You've reached the 20 change-order limit on the Free plan. Upgrade to Pro for unlimited change orders.",
-      };
-    }
-  }
-
   const projectId = String(formData.get("projectId") ?? "");
   const description = String(formData.get("description") ?? "").trim();
   const cost = Number(formData.get("cost"));
@@ -141,6 +123,28 @@ export async function createChangeOrder(
 
   if (projectError || !project) {
     return { error: "Could not find that project." };
+  }
+
+  const plan = await getUserPlan(user.id);
+
+  if (!plan.features.unlimitedChangeOrders) {
+    // Org-scoped, not user-scoped — this is a business-level limit, not a
+    // personal one, and every change order belongs to an organization now.
+    const { count, error: countError } = await asOrgClient(getSupabaseAdmin())
+      .from("change_orders")
+      .select("id", { count: "exact", head: true })
+      .eq("organization_id", project.organization_id);
+
+    if (countError) {
+      return { error: `Could not check change order limit: ${countError.message}` };
+    }
+
+    if ((count ?? 0) >= 20) {
+      return {
+        error:
+          "You've reached the 20 change-order limit on the Free plan. Upgrade to Pro for unlimited change orders.",
+      };
+    }
   }
 
   // Providers can only insert change orders on projects they own — enforced
@@ -196,13 +200,19 @@ export async function recordOfflinePayment(formData: FormData) {
     throw new Error("Change order not found.");
   }
 
-  const { data: project } = await supabaseAdmin
+  // RLS-scoped lookup, not the admin client — a null result here means the
+  // caller isn't an active member of this project's organization, which is
+  // the actual authorization check (mirrors createChangeOrder's pattern).
+  // The rest of the function still uses the admin client below, since
+  // change_orders' column-level grants require service-role to write
+  // status/payment fields regardless of organization membership.
+  const { data: project } = await asOrgClient(supabase)
     .from("projects")
-    .select("id, user_id")
+    .select("id, organization_id")
     .eq("id", changeOrder.project_id)
     .maybeSingle();
 
-  if (!project || project.user_id !== user.id) {
+  if (!project) {
     throw new Error("You don't have access to this change order.");
   }
 
@@ -276,13 +286,15 @@ export async function countersignChangeOrder(formData: FormData) {
     throw new Error("Change order not found.");
   }
 
-  const { data: project } = await supabaseAdmin
+  // RLS-scoped lookup, not the admin client — see recordOfflinePayment above
+  // for why a null result is itself the authorization check.
+  const { data: project } = await asOrgClient(supabase)
     .from("projects")
-    .select("id, user_id")
+    .select("id, organization_id")
     .eq("id", changeOrder.project_id)
     .maybeSingle();
 
-  if (!project || project.user_id !== user.id) {
+  if (!project) {
     throw new Error("You don't have access to this change order.");
   }
 
@@ -405,13 +417,15 @@ export async function refundChangeOrder(formData: FormData) {
     throw new Error("Change order not found.");
   }
 
-  const { data: project } = await supabaseAdmin
+  // RLS-scoped lookup, not the admin client — see recordOfflinePayment above
+  // for why a null result is itself the authorization check.
+  const { data: project } = await asOrgClient(supabase)
     .from("projects")
-    .select("id, user_id")
+    .select("id, organization_id")
     .eq("id", changeOrder.project_id)
     .maybeSingle();
 
-  if (!project || project.user_id !== user.id) {
+  if (!project) {
     throw new Error("You don't have access to this change order.");
   }
 

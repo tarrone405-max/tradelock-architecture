@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { createClient } from "@/lib/supabase/server";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { asOrgClient } from "@/src/core/organizations/database.types";
 import ChangeOrderPdfDocument from "@/components/pdf/ChangeOrderPdfDocument";
 
 export const runtime = "nodejs";
@@ -55,7 +56,21 @@ export async function GET(
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    authorized = user?.id === project.user_id;
+
+    if (user) {
+      // RLS-scoped lookup, not the admin client used above — a row coming
+      // back means the signed-in user is an active member of this project's
+      // organization, which is the actual authorization check (mirrors the
+      // pattern used in app/(dashboard)/dashboard/actions.ts). Replaces a
+      // plain user.id === project.user_id check, which only ever authorized
+      // the original creating user, not other members of the same org.
+      const { data: membershipCheck } = await asOrgClient(supabase)
+        .from("projects")
+        .select("id")
+        .eq("id", project.id)
+        .maybeSingle();
+      authorized = membershipCheck !== null;
+    }
   }
 
   if (!authorized) {
