@@ -910,11 +910,15 @@ export async function submitReview(
 
   const supabaseAdmin = getSupabaseAdmin();
 
+  // Settled either through Stripe or a payment the provider recorded
+  // manually (cash/check/financed) — mirrors the dashboard's
+  // SETTLED_POSITIVE list (app/(dashboard)/dashboard/page.tsx) and the
+  // portal page's own isPaid/canReview checks (app/p/[token]/page.tsx).
   const { data: hasPaidOrder } = await supabaseAdmin
     .from("change_orders")
     .select("id")
     .eq("project_id", project.id)
-    .eq("status", "paid")
+    .in("status", ["paid", "cash", "check", "financed"])
     .limit(1)
     .maybeSingle();
 

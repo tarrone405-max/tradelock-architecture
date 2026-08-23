@@ -141,9 +141,13 @@ export default async function ClientPortalPage({
   const companyName =
     project.users?.company_name ?? null;
 
-  // At least one paid change order and no review yet -> eligible to leave one.
+  // At least one settled change order and no review yet -> eligible to leave
+  // one. "Settled" mirrors the dashboard's SETTLED_POSITIVE list
+  // (app/(dashboard)/dashboard/page.tsx) — a cash/check/financed payment
+  // recorded by the provider is just as complete as a Stripe one.
   const canReview =
-    !review && orders.some((order) => order.status === "paid");
+    !review &&
+    orders.some((order) => ["paid", "cash", "check", "financed"].includes(order.status));
 
   // Pro+ providers can remove TradeLock's own footer branding from the
   // portal their clients see (lib/plans.ts's removeTradeLockBranding flag).
@@ -273,8 +277,11 @@ export default async function ClientPortalPage({
               const isApproved =
                 co.status === "approved";
 
+              // Settled either through Stripe or a payment the provider
+              // recorded manually (cash/check/financed) — both are a
+              // completed payment from the client's point of view.
               const isPaid =
-                co.status === "paid";
+                ["paid", "cash", "check", "financed"].includes(co.status);
 
               return (
                 <li
