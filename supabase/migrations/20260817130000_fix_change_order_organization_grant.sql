@@ -1,0 +1,23 @@
+-- TradeLock — Fix change_orders column-level INSERT grant for organization_id
+--
+-- 20260817120000_add_organizations.sql added a NOT NULL organization_id
+-- column to change_orders and updated its RLS *policies* to check
+-- organization membership, but deliberately left the column-level GRANT
+-- from 20260810100000_harden_change_order_rls.sql untouched:
+--
+--   grant insert (project_id, description, cost, due_date) on public.change_orders to authenticated;
+--
+-- That grant only ever named four columns. createChangeOrder() (see
+-- app/(dashboard)/dashboard/actions.ts) must now also write organization_id
+-- on every insert, since the column is NOT NULL with no default — and
+-- because organization_id isn't in the granted column list, Postgres
+-- rejects the whole insert with "permission denied for table
+-- change_orders" (a column-privilege error, not an RLS violation — RLS
+-- policies are never even evaluated, since the privilege check happens
+-- first). Reproduced live against the real database before writing this
+-- fix: project creation works (projects has no column-level grants to be
+-- out of date), change-order creation does not.
+--
+-- Column privileges in Postgres are additive — this does not need to
+-- restate or revoke the four existing columns, only add the missing one.
+grant insert (organization_id) on public.change_orders to authenticated;
