@@ -1,0 +1,37 @@
+-- TradeLock — Fix is_organization_member volatility for same-statement inserts
+--
+-- 20260823000000_default_organization_id_trigger.sql's BEFORE INSERT
+-- triggers create a brand-new organization (and the caller's Owner
+-- membership row) inline, within the same INSERT statement, when a legacy
+-- insert (main's code) supplies no organization_id. Reproduced live: this
+-- inline-creation path still failed RLS's WITH CHECK with 42501 even after
+-- the trigger ran and set organization_id to the newly created org's id.
+--
+-- Root cause: is_organization_member() (20260817120000_add_organizations.sql)
+-- is marked STABLE. A STABLE function's result is fixed to the snapshot in
+-- effect at the start of the current statement — it does not see rows
+-- inserted earlier in that SAME statement, including rows inserted by a
+-- BEFORE ROW trigger on the very row currently being processed. So when the
+-- trigger creates the new organization_members row moments before RLS's
+-- WITH CHECK calls is_organization_member(new.organization_id), that call
+-- doesn't see the membership it depends on, and returns false.
+--
+-- This only ever mattered for the brand-new inline-creation path the
+-- compatibility trigger introduces — every pre-existing call in this
+-- codebase (platform-v2's createProject/createChangeOrder, and RLS's own
+-- SELECT/UPDATE/DELETE policies) always checks membership rows that were
+-- already committed as of the start of their statement, so this gap was
+-- latent until now.
+--
+-- VOLATILE is a strictly safe substitute for STABLE from a correctness
+-- standpoint (it only tells the planner not to cache/reuse results across
+-- calls in the same statement — it can never produce a wrong answer, only
+-- recompute more than strictly necessary). It also costs nothing here in
+-- practice: is_organization_member is plpgsql + security definer, which the
+-- planner already couldn't inline or cache the way it can for a plain SQL
+-- function regardless of volatility (see that migration's own header
+-- comment on why plpgsql was required). Verified live: this change alone
+-- (tested via a temporary ALTER FUNCTION before committing it here) fixed
+-- the compatibility trigger's inline-creation path with no other change.
+
+alter function public.is_organization_member(uuid) volatile;
