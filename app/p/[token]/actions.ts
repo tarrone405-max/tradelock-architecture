@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import Stripe from "stripe";
 
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { asOrgClient } from "@/src/core/organizations/database.types";
 import { getStripe } from "@/lib/stripe";
 import {
   getApplicationFeeAmount,
@@ -34,12 +35,12 @@ async function getProjectByToken(token: string) {
     return null;
   }
 
-  const supabaseAdmin = getSupabaseAdmin();
+  const supabaseAdmin = asOrgClient(getSupabaseAdmin());
 
   const { data: project, error } = await supabaseAdmin
     .from("projects")
     .select(
-      "id, user_id, client_name, client_email, unique_token"
+      "id, user_id, organization_id, client_name, client_email, unique_token"
     )
     .eq("unique_token", token)
     .is("portal_token_revoked_at", null)
@@ -390,7 +391,7 @@ export async function payChangeOrder(
   }
 
   const supabaseAdmin =
-    getSupabaseAdmin();
+    asOrgClient(getSupabaseAdmin());
 
   // ==========================================================
   // 2. LOAD CHANGE ORDER + PROVIDER
@@ -399,6 +400,7 @@ export async function payChangeOrder(
   const [
     { data: changeOrder },
     { data: provider },
+    { data: organization },
   ] = await Promise.all([
     supabaseAdmin
       .from("change_orders")
@@ -429,7 +431,33 @@ export async function payChangeOrder(
       )
       .eq("id", project.user_id)
       .maybeSingle(),
+
+    supabaseAdmin
+      .from("organizations")
+      .select("id, owner_id")
+      .eq("id", project.organization_id)
+      .maybeSingle(),
   ]);
+
+  // Below, the provider's Stripe Connect destination account and fee-rate
+  // tier are read off `project.user_id -> users`, not the project's
+  // organization — correct only because every organization has exactly one
+  // member (its owner) today, with no invite flow yet to add a second. If
+  // that ever stops being true without this code being updated first, a
+  // non-owner member's project would silently route payment to (or price
+  // it off) the wrong account. Fail loudly instead of guessing: this must
+  // stay true until a future sprint moves this lookup onto the
+  // organization itself (see supabase/migrations/20260817120000's header
+  // comment — that cutover was deliberately deferred, not forgotten).
+  if (!organization || organization.owner_id !== project.user_id) {
+    console.error(
+      "payChangeOrder: project.user_id does not match its organization's owner_id — refusing to guess which Stripe account/fee tier to use.",
+      { projectId: project.id, organizationId: project.organization_id }
+    );
+    throw new Error(
+      "This project's payment setup couldn't be verified. Please contact support."
+    );
+  }
 
   // ==========================================================
   // 3. BOTH SIDES MUST HAVE SIGNED
